@@ -20,7 +20,8 @@ passcode:password\\c123\n\n\x00"
         (b"host", b"datafeeds.here.co.uk"),
         (b"login", b"user"),
         (b"heart-beat", b"6,7"),
-        (b"passcode", b"password:123"),
+        // In STOMP 1.2, CONNECT and CONNECTED frames do not escape/unescape headers.
+        (b"passcode", b"password\\c123"),
     ];
     let fh: Vec<_> = frame
         .headers
@@ -311,4 +312,135 @@ content-length:{}
         )
         .as_bytes()
     );
+}
+
+#[test]
+fn test_invalid_escape_sequence_fails() {
+    // \t is an undefined escape sequence, which must fail
+    let data = b"MESSAGE
+destination:test
+invalid-header:value\\twith\\tinvalid\\tescape
+
+\0";
+    let res = parse_frame(data);
+    assert!(
+        res.is_err(),
+        "Undefined escape sequences must cause a parsing error"
+    );
+}
+
+#[test]
+fn test_multiple_leading_eol_heartbeats() {
+    // Leading and trailing heartbeats (multiple EOLs) between frames
+    let data = b"\n\r\n\nMESSAGE\ndestination:test\n\n\0\n\r\n";
+    let (remain, frame) = parse_frame(data).unwrap();
+    assert_eq!(frame.command, "MESSAGE");
+    assert_eq!(remain, b"\r\n");
+}
+
+#[test]
+fn test_connect_frame_does_not_escape() {
+    let frame = StompFrame {
+        command: "CONNECT".into(),
+        headers: vec![("passcode".to_string(), "pass:word\\c123".to_string())],
+        body: None,
+    };
+    let serialized = frame.serialize();
+    assert_eq!(
+        serialized.as_ref(),
+        b"CONNECT\npasscode:pass:word\\c123\n\n\0"
+    );
+
+    let (_, parsed) = parse_frame(&serialized).unwrap();
+    assert_eq!(parsed.headers[0].1, "pass:word\\c123");
+}
+
+#[test]
+fn test_codec_decode_encode() {
+    let data = b"MESSAGE\ndestination:test\ncontent-length:5\n\nhello\0";
+    let mut buf = BytesMut::from(&data[..]);
+    let mut codec = StompCodec::default();
+
+    // Test decoding
+    let frame = codec.decode(&mut buf).unwrap().unwrap();
+    assert_eq!(frame.command, "MESSAGE");
+    assert_eq!(frame.headers[0].1, "test");
+    assert_eq!(frame.body.as_ref().unwrap().as_ref(), b"hello");
+    assert!(buf.is_empty());
+
+    // Test encoding
+    let mut out_buf = BytesMut::new();
+    codec.encode(frame, &mut out_buf).unwrap();
+    assert_eq!(out_buf.as_ref(), data);
+}
+
+#[test]
+fn test_codec_incomplete_decode() {
+    let data = b"MESSAGE\ndestination:test\n\nhel";
+    let mut buf = BytesMut::from(&data[..]);
+    let mut codec = StompCodec::default();
+
+    let res = codec.decode(&mut buf).unwrap();
+    assert!(res.is_none(), "Should return None on incomplete data");
+    assert_eq!(buf.len(), data.len(), "Buffer should not be advanced");
+}
+
+#[test]
+fn test_user_scenario_content_length() {
+    let data = b"SEND
+destination:/topic/aaaa
+content-length:4
+
+aaaa\0";
+    let (remain, frame) = parse_frame(data).unwrap();
+    assert_eq!(frame.command, "SEND");
+    assert_eq!(frame.body.as_ref().unwrap().as_ref(), b"aaaa");
+    assert_eq!(remain, b"");
+}
+
+#[test]
+fn test_heartbeat_decoding() {
+    let mut buf = BytesMut::from(&b"\n\nMESSAGE\ndestination:test\n\n\0"[..]);
+    let mut codec = StompCodec::default();
+
+    // First decode yields HEARTBEAT because it consumes both leading newlines
+    let hb1 = codec.decode(&mut buf).unwrap().unwrap();
+    assert_eq!(hb1.command, "HEARTBEAT");
+
+    // Second decode yields the actual MESSAGE frame
+    let msg = codec.decode(&mut buf).unwrap().unwrap();
+    assert_eq!(msg.command, "MESSAGE");
+}
+
+#[test]
+fn test_get_header() {
+    let frame = StompFrame {
+        command: "MESSAGE".into(),
+        headers: vec![
+            ("key1".to_string(), "val1".to_string()),
+            ("key2".to_string(), "val2".to_string()),
+            ("key1".to_string(), "val3".to_string()), // duplicate key
+        ],
+        body: None,
+    };
+    assert_eq!(frame.get_header("key1"), Some("val1"));
+    assert_eq!(frame.get_header("key2"), Some("val2"));
+    assert_eq!(frame.get_header("key3"), None);
+}
+
+#[test]
+fn test_stomp_frame_does_not_escape() {
+    let frame = StompFrame {
+        command: "STOMP".into(),
+        headers: vec![("passcode".to_string(), "pass:word\\c123".to_string())],
+        body: None,
+    };
+    let serialized = frame.serialize();
+    assert_eq!(
+        serialized.as_ref(),
+        b"STOMP\npasscode:pass:word\\c123\n\n\0"
+    );
+
+    let (_, parsed) = parse_frame(&serialized).unwrap();
+    assert_eq!(parsed.headers[0].1, "pass:word\\c123");
 }

@@ -1,0 +1,16 @@
+[package]
+name = "stompoxide-codec"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+license = "MIT"
+
+[dependencies]
+winnow = { version = "1" }
+tokio-util = { version = "0.7", features = ["codec"] }
+tokio = { version = "1", features = ["io-util"] }
+bytes = "1"
+
+[dev-dependencies]
+assert_matches2 = "0.1"
+pretty_assertions = { version = "1" }

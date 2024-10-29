@@ -1,0 +1,17 @@
+[package]
+name = "stompoxide-client"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.86"
+license = "MIT"
+
+[dependencies]
+stompoxide-codec = { path = "../stompoxide-codec" }
+tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
+futures-core = "0.3"
+log = "0.4"
+tokio-stream = { version = "0.1", features = ["sync"] }
+
+[dev-dependencies]

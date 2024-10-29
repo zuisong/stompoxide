@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>STOMP over WebSocket Debugging Client</title>
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- STOMP JS CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/@stomp/stompjs@7.0.0/bundles/stomp.umd.min.js"></script>
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --card-bg: rgba(20, 28, 48, 0.6);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-primary: #f3f4f6;
+            --text-secondary: #9ca3af;
+            --primary-glow: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
+            --accent-green: #10b981;
+            --accent-red: #ef4444;
+            --accent-blue: #3b82f6;
+            --accent-purple: #8b5cf6;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-primary);
+            font-family: 'Outfit', sans-serif;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            overflow-x: hidden;
+            background-image: 
+                radial-gradient(circle at 10% 20%, rgba(59, 130, 246, 0.08) 0%, transparent 40%),
+                radial-gradient(circle at 90% 80%, rgba(139, 92, 246, 0.08) 0%, transparent 40%);
+        }
+
+        header {
+            padding: 24px 40px;
+            border-bottom: 1px solid var(--border-color);
+            background: rgba(11, 15, 25, 0.8);
+            backdrop-filter: blur(12px);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        header h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: linear-gradient(to right, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .status-badge {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 600;
+            letter-spacing: 0.05em;
+            text-transform: uppercase;
+            background: rgba(239, 68, 68, 0.1);
+            color: var(--accent-red);
+            border: 1px solid rgba(239, 68, 68, 0.2);
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-badge.connected {
+            background: rgba(16, 185, 129, 0.1);
+            color: var(--accent-green);
+            border: 1px solid rgba(16, 185, 129, 0.2);
+            box-shadow: 0 0 12px rgba(16, 185, 129, 0.15);
+        }
+
+        .status-badge.connecting {
+            background: rgba(245, 158, 11, 0.1);
+            color: #f59e0b;
+            border: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .pulse-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background-color: currentColor;
+            display: inline-block;
+        }
+        .connected .pulse-dot {
+            animation: pulse 1.5s infinite;
+        }
+
+        @keyframes pulse {
+            0% { transform: scale(0.9); opacity: 1; }
+            50% { transform: scale(1.3); opacity: 0.5; }
+            100% { transform: scale(0.9); opacity: 1; }
+        }
+
+        main {
+            max-width: 1440px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 32px;
+            display: grid;
+            grid-template-columns: 380px 1fr;
+            gap: 24px;
+            flex-grow: 1;
+        }
+
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .card {
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 24px;
+            backdrop-filter: blur(16px);
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            transition: border-color 0.3s;
+        }
+
+        .card:hover {
+            border-color: rgba(255, 255, 255, 0.15);
+        }
+
+        .card-title {
+            font-size: 1.1rem;
+            font-weight: 600;
+            margin-bottom: 20px;
+            letter-spacing: 0.02em;
+            border-left: 3px solid #3b82f6;
+            padding-left: 10px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: var(--text-secondary);
+            margin-bottom: 8px;
+        }
+
+        .form-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 12px;
+        }
+
+        input, textarea, select {
+            width: 100%;
+            background: rgba(17, 24, 39, 0.7);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px 14px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 0.9rem;
+            transition: all 0.2s;
+        }
+
+        input:focus, textarea:focus, select:focus {
+            outline: none;
+            border-color: #3b82f6;
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.15);
+            background: rgba(17, 24, 39, 0.9);
+        }
+
+        .btn {
+            width: 100%;
+            padding: 12px;
+            border-radius: 8px;
+            border: none;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+        }
+
+        .btn-primary {
+            background: var(--primary-glow);
+            color: white;
+            box-shadow: 0 4px 12px rgba(59, 130, 246, 0.25);
+        }
+
+        .btn-primary:hover {
+            opacity: 0.95;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(59, 130, 246, 0.35);
+        }
+
+        .btn-danger {
+            background: linear-gradient(135deg, var(--accent-red) 0%, #b91c1c 100%);
+            color: white;
+            box-shadow: 0 4px 12px rgba(239, 68, 68, 0.25);
+        }
+
+        .btn-danger:hover {
+            opacity: 0.95;
+            transform: translateY(-1px);
+            box-shadow: 0 6px 16px rgba(239, 68, 68, 0.35);
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.05);
+            color: var(--text-primary);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .sub-list {
+            list-style: none;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .sub-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 10px 12px;
+            background: rgba(255, 255, 255, 0.03);
+            border-radius: 8px;
+            margin-bottom: 8px;
+            font-size: 0.85rem;
+            border: 1px solid rgba(255, 255, 255, 0.03);
+        }
+
+        .sub-item span {
+            font-family: 'JetBrains Mono', monospace;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 220px;
+        }
+
+        .sub-item button {
+            background: none;
+            border: none;
+            color: var(--accent-red);
+            cursor: pointer;
+            font-weight: 500;
+            padding: 2px 6px;
+            border-radius: 4px;
+            transition: background 0.2s;
+        }
+
+        .sub-item button:hover {
+            background: rgba(239, 68, 68, 0.1);
+        }
+
+        .empty-state {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+            text-align: center;
+            padding: 20px 0;
+            border: 1px dashed var(--border-color);
+            border-radius: 8px;
+        }
+
+        .console-container {
+            display: flex;
+            flex-direction: column;
+            height: calc(100vh - 140px);
+            gap: 20px;
+        }
+
+        .console-log {
+            flex-grow: 1;
+            background: #05070c;
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 20px;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.85rem;
+            line-height: 1.5;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            box-shadow: inset 0 4px 20px rgba(0, 0, 0, 0.5);
+        }
+
+        .log-entry {
+            display: flex;
+            flex-direction: column;
+            border-radius: 8px;
+            padding: 10px 14px;
+            background: rgba(255, 255, 255, 0.02);
+            border-left: 3px solid var(--text-secondary);
+        }
+
+        .log-entry.info {
+            border-left-color: var(--accent-blue);
+            background: rgba(59, 130, 246, 0.03);
+        }
+
+        .log-entry.incoming {
+            border-left-color: var(--accent-green);
+            background: rgba(16, 185, 129, 0.03);
+        }
+
+        .log-entry.outgoing {
+            border-left-color: var(--accent-purple);
+            background: rgba(139, 92, 246, 0.03);
+        }
+
+        .log-entry.error {
+            border-left-color: var(--accent-red);
+            background: rgba(239, 68, 68, 0.03);
+        }
+
+        .log-header {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-bottom: 6px;
+        }
+
+        .log-time {
+            color: #555866;
+        }
+
+        .log-direction {
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .incoming .log-direction { color: var(--accent-green); }
+        .outgoing .log-direction { color: var(--accent-purple); }
+        .error .log-direction { color: var(--accent-red); }
+        .info .log-direction { color: var(--accent-blue); }
+
+        .log-body {
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+
+        .action-row {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 10px;
+        }
+
+        .clear-btn {
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid var(--border-color);
+            color: var(--text-secondary);
+            padding: 6px 12px;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .clear-btn:hover {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-primary);
+        }
+
+        /* Scrollbar styles */
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: rgba(0,0,0,0.1);
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255,255,255,0.1);
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255,255,255,0.2);
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1><span>⚡</span> STOMP WebSocket Debugger</h1>
+        <div id="statusBadge" class="status-badge">
+            <span class="pulse-dot"></span>
+            <span id="statusText">Disconnected</span>
+        </div>
+    </header>
+
+    <main>
+        <div class="sidebar">
+            <!-- Connection Setup -->
+            <div class="card">
+                <div class="card-title">Broker Configuration</div>
+                <div class="form-group">
+                    <label for="wsUrl">WebSocket URL</label>
+                    <input type="text" id="wsUrl" value="ws://127.0.0.1:3000/ws">
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="login">Login</label>
+                        <input type="text" id="login" placeholder="optional">
+                    </div>
+                    <div class="form-group">
+                        <label for="passcode">Passcode</label>
+                        <input type="password" id="passcode" placeholder="optional">
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="hbCx">Heartbeat Out (ms)</label>
+                        <input type="number" id="hbCx" value="5000" min="0">
+                    </div>
+                    <div class="form-group">
+                        <label for="hbCy">Heartbeat In (ms)</label>
+                        <input type="number" id="hbCy" value="5000" min="0">
+                    </div>
+                </div>
+                <button id="connectBtn" class="btn btn-primary" onclick="toggleConnect()">Connect</button>
+            </div>
+
+            <!-- Subscriptions -->
+            <div class="card">
+                <div class="card-title">Subscriptions</div>
+                <div class="form-group" style="display: flex; gap: 8px;">
+                    <input type="text" id="subDest" placeholder="e.g. /topic/logs" value="/topic/*">
+                    <button id="subBtn" class="btn btn-primary" style="width: auto; padding: 0 16px;" onclick="subscribe()" disabled>Subscribe</button>
+                </div>
+                <ul id="subList" class="sub-list">
+                    <div class="empty-state" id="noSubs">No active subscriptions</div>
+                </ul>
+            </div>
+
+            <!-- Publish -->
+            <div class="card">
+                <div class="card-title">Publish Message</div>
+                <div class="form-group">
+                    <label for="pubDest">Destination</label>
+                    <input type="text" id="pubDest" placeholder="e.g. /topic/logs" value="/topic/hello">
+                </div>
+                <div class="form-group">
+                    <label for="pubBody">Payload</label>
+                    <textarea id="pubBody" rows="4" placeholder='{"hello": "world"}'>Hello from STOMP over WebSocket!</textarea>
+                </div>
+                <div class="form-group" style="display: flex; align-items: center; gap: 8px; margin-bottom: 20px;">
+                    <input type="checkbox" id="pubReceipt" style="width: auto; cursor: pointer;">
+                    <label for="pubReceipt" style="margin-bottom: 0; cursor: pointer; color: var(--text-secondary);">Request Receipt (receipt header)</label>
+                </div>
+                <button id="sendBtn" class="btn btn-secondary" onclick="publish()" disabled>Publish Frame</button>
+            </div>
+        </div>
+
+        <!-- Logging Console -->
+        <div class="console-container">
+            <div class="card" style="flex-grow: 1; display: flex; flex-direction: column; padding: 20px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+                    <div class="card-title" style="margin-bottom: 0;">Live Frame Stream</div>
+                    <button class="clear-btn" onclick="clearLogs()">Clear Output</button>
+                </div>
+                <div id="consoleLog" class="console-log">
+                    <div class="log-entry info">
+                        <div class="log-header">
+                            <span class="log-direction">System</span>
+                            <span class="log-time" id="initTime"></span>
+                        </div>
+                        <div class="log-body">Console initialized. Ready to connect to STOMP broker.</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <script>
+        document.getElementById('initTime').textContent = new Date().toLocaleTimeString();
+
+        let stompClient = null;
+        const activeSubscriptions = new Map();
+
+        const statusBadge = document.getElementById('statusBadge');
+        const statusText = document.getElementById('statusText');
+        const connectBtn = document.getElementById('connectBtn');
+        const subBtn = document.getElementById('subBtn');
+        const sendBtn = document.getElementById('sendBtn');
+        const consoleLog = document.getElementById('consoleLog');
+
+        function log(direction, type, message) {
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${direction}`;
+
+            const header = document.createElement('div');
+            header.className = 'log-header';
+
+            const dirSpan = document.createElement('span');
+            dirSpan.className = 'log-direction';
+            dirSpan.textContent = type;
+
+            const timeSpan = document.createElement('span');
+            timeSpan.className = 'log-time';
+            timeSpan.textContent = new Date().toLocaleTimeString();
+
+            header.appendChild(dirSpan);
+            header.appendChild(timeSpan);
+
+            const body = document.createElement('div');
+            body.className = 'log-body';
+            body.textContent = message;
+
+            entry.appendChild(header);
+            entry.appendChild(body);
+
+            consoleLog.appendChild(entry);
+            consoleLog.scrollTop = consoleLog.scrollHeight;
+        }
+
+        function clearLogs() {
+            consoleLog.innerHTML = '';
+        }
+
+        function updateUIState(state) {
+            if (state === 'connected') {
+                statusBadge.className = 'status-badge connected';
+                statusText.textContent = 'Connected';
+                connectBtn.textContent = 'Disconnect';
+                connectBtn.className = 'btn btn-danger';
+                subBtn.removeAttribute('disabled');
+                sendBtn.removeAttribute('disabled');
+            } else if (state === 'connecting') {
+                statusBadge.className = 'status-badge connecting';
+                statusText.textContent = 'Connecting...';
+                connectBtn.textContent = 'Connecting...';
+                connectBtn.className = 'btn btn-secondary';
+                connectBtn.setAttribute('disabled', 'true');
+                subBtn.setAttribute('disabled', 'true');
+                sendBtn.setAttribute('disabled', 'true');
+            } else {
+                statusBadge.className = 'status-badge';
+                statusText.textContent = 'Disconnected';
+                connectBtn.textContent = 'Connect';
+                connectBtn.className = 'btn btn-primary';
+                connectBtn.removeAttribute('disabled');
+                subBtn.setAttribute('disabled', 'true');
+                sendBtn.setAttribute('disabled', 'true');
+                
+                // Clear active subscriptions UI
+                activeSubscriptions.clear();
+                renderSubscriptions();
+            }
+        }
+
+        function toggleConnect() {
+            if (stompClient && stompClient.connected) {
+                log('info', 'System', 'Disconnecting client...');
+                stompClient.deactivate();
+            } else {
+                connect();
+            }
+        }
+
+        function connect() {
+            const wsUrl = document.getElementById('wsUrl').value;
+            const login = document.getElementById('login').value;
+            const passcode = document.getElementById('passcode').value;
+            const hbCx = parseInt(document.getElementById('hbCx').value) || 0;
+            const hbCy = parseInt(document.getElementById('hbCy').value) || 0;
+
+            log('info', 'System', `Initiating connection to ${wsUrl}...`);
+            updateUIState('connecting');
+
+            stompClient = new StompJs.Client({
+                brokerURL: wsUrl,
+                connectHeaders: {
+                    login: login || undefined,
+                    passcode: passcode || undefined
+                },
+                heartbeatIncoming: hbCy,
+                heartbeatOutgoing: hbCx,
+                debug: function (str) {
+                    // Extract Frame direction/type for pretty print
+                    if (str.startsWith('>>> ')) {
+                        log('outgoing', 'Sent Frame', str.substring(4));
+                    } else if (str.startsWith('<<< ')) {
+                        log('incoming', 'Received Frame', str.substring(4));
+                    } else {
+                        log('info', 'Debug', str);
+                    }
+                },
+                onConnect: (frame) => {
+                    log('info', 'System', 'STOMP Connection Established.');
+                    updateUIState('connected');
+                },
+                onStompError: (frame) => {
+                    log('error', 'Broker Error', `Error Frame:\nHeaders: ${JSON.stringify(frame.headers)}\nBody: ${frame.body}`);
+                    updateUIState('disconnected');
+                },
+                onWebSocketClose: () => {
+                    log('info', 'System', 'WebSocket connection closed.');
+                    updateUIState('disconnected');
+                },
+                onDisconnect: () => {
+                    log('info', 'System', 'STOMP client deactivated.');
+                    updateUIState('disconnected');
+                }
+            });
+
+            stompClient.activate();
+        }
+
+        function subscribe() {
+            const destination = document.getElementById('subDest').value;
+            if (!destination) return;
+
+            log('info', 'System', `Subscribing to ${destination}...`);
+            
+            const sub = stompClient.subscribe(destination, (message) => {
+                log('incoming', `Msg Recv: ${destination}`, `Headers: ${JSON.stringify(message.headers)}\nBody: ${message.body}`);
+            });
+
+            activeSubscriptions.set(destination, sub);
+            renderSubscriptions();
+        }
+
+        function unsubscribe(destination) {
+            const sub = activeSubscriptions.get(destination);
+            if (sub) {
+                log('info', 'System', `Unsubscribing from ${destination}...`);
+                sub.unsubscribe();
+                activeSubscriptions.delete(destination);
+                renderSubscriptions();
+            }
+        }
+
+        function renderSubscriptions() {
+            const subList = document.getElementById('subList');
+            subList.innerHTML = '';
+
+            if (activeSubscriptions.size === 0) {
+                subList.innerHTML = '<div class="empty-state" id="noSubs">No active subscriptions</div>';
+                return;
+            }
+
+            activeSubscriptions.forEach((sub, destination) => {
+                const li = document.createElement('li');
+                li.className = 'sub-item';
+                li.innerHTML = `
+                    <span>${destination}</span>
+                    <button onclick="unsubscribe('${destination}')">Unsubscribe</button>
+                `;
+                subList.appendChild(li);
+            });
+        }
+
+        function publish() {
+            const destination = document.getElementById('pubDest').value;
+            const body = document.getElementById('pubBody').value;
+            const requestReceipt = document.getElementById('pubReceipt').checked;
+
+            if (!destination) return;
+
+            log('info', 'System', `Publishing to ${destination}...`);
+            
+            const headers = {};
+            if (requestReceipt) {
+                // Generate a simple unique receipt ID
+                headers['receipt'] = 'receipt-' + Math.random().toString(36).substring(2, 9);
+            }
+
+            stompClient.publish({
+                destination: destination,
+                headers: headers,
+                body: body
+            });
+        }
+    </script>
+</body>
+</html>

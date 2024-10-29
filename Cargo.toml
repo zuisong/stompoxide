@@ -1,14 +1,7 @@
-[package]
-name = "stomp-parser"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.88"
-license = "MIT"
-
-[dependencies]
-winnow = { version = "= 0.7" }
-
-[dev-dependencies]
-assert_matches2 = "0.1"
-pretty_assertions = { version = "1" }
-
+[workspace]
+resolver = "2"
+members = [
+    "crates/stompoxide-codec",
+    "crates/stompoxide-client",
+    "crates/stompoxide-server",
+]
