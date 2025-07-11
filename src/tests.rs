@@ -1,7 +1,8 @@
-use super::*;
 use assert_matches2::assert_matches;
 use pretty_assertions::assert_eq;
 use winnow::error::ErrMode::Incomplete;
+
+use super::*;
 
 #[test]
 fn parse_and_serialize_connect() {
@@ -67,7 +68,7 @@ message-id:12345
 subscription:some-id"
         .to_vec();
     let body = "\n\n\nthis body contains  nulls \n and \r\n newlines OK?";
-    let rest = format!("\n\n{}\x00\r\n", body);
+    let rest = format!("\n\n{body}\x00\r\n");
     data.extend_from_slice(rest.as_bytes());
     let (_, frame) = parse_frame(&data).unwrap();
     assert_eq!(frame.command.as_bytes(), b"MESSAGE");

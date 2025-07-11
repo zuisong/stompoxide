@@ -1,13 +1,12 @@
 use std::borrow::Cow;
-use winnow::error::ContextError;
-use winnow::{
-    ascii::{alpha1, escaped_transform, line_ending, till_line_ending},
-    combinator::{alt, delimited, opt, repeat, separated_pair, terminated},
-    token::{literal, take, take_till, take_until, take_while},
-    unpeek, IResult, PResult, Parser, Partial,
-};
 
-type Stream<'i> = Partial<&'i [u8]>;
+use winnow::{
+    ModalResult, Parser, Partial,
+    ascii::{alpha1, escaped, line_ending, till_line_ending},
+    combinator::{alt, delimited, opt, repeat, separated_pair, terminated},
+    error::ContextError,
+    token::{literal, take, take_till, take_until, take_while},
+};
 
 #[cfg(test)]
 mod tests;
@@ -20,7 +19,7 @@ pub struct StompFrame<'a> {
 }
 
 impl StompFrame<'_> {
-    pub fn serialize(&self) -> Cow<[u8]> {
+    pub fn serialize(&'_ self) -> Cow<'_, [u8]> {
         let mut buffer = Vec::new();
         fn escaped(b: &u8) -> &[u8] {
             let escaped: &[u8] = match b {
@@ -30,13 +29,13 @@ impl StompFrame<'_> {
                 b'\\' => b"\\\\",
                 bytes => std::slice::from_ref(bytes),
             };
-           escaped
+            escaped
         }
         buffer.extend_from_slice(self.command.as_bytes());
         buffer.push(b'\n');
-        self.headers.iter().for_each(|(key, ref val)| {
+        self.headers.iter().for_each(|(key, val)| {
             for byte in key.as_bytes() {
-               buffer.extend_from_slice(escaped(byte));
+                buffer.extend_from_slice(escaped(byte));
             }
             buffer.push(b':');
             for byte in val.as_bytes() {
@@ -58,7 +57,7 @@ impl StompFrame<'_> {
 
 fn get_content_length(headers: &Vec<(String, String)>) -> Option<usize> {
     for (name, value) in headers {
-        if name.eq("content-length") {
+        if *name == "content-length" {
             return value.parse::<usize>().ok();
         }
     }
@@ -69,13 +68,13 @@ fn map_empty_slice(s: &[u8]) -> Option<&[u8]> {
     Some(s).filter(|c| !c.is_empty())
 }
 
-pub fn parse_frame(input: &[u8]) -> IResult<&[u8], StompFrame, ContextError> {
-    let mut partial: Partial<& [u8]> = Partial::new(input);
+pub fn parse_frame(input: &'_ [u8]) -> ModalResult<(&'_ [u8], StompFrame<'_>), ContextError> {
+    let mut partial = Partial::new(input);
     let result = { parse_frame_stream(&mut partial)? };
     Ok((partial.into_inner(), result))
 }
 
-pub fn parse_frame_stream<'b>(input: &mut Partial<&'b [u8]>) -> PResult<StompFrame<'b>> {
+pub fn parse_frame_stream<'b>(input: &mut Partial<&'b [u8]>) -> ModalResult<StompFrame<'b>> {
     // dbg!(&String::from_utf8_lossy(input));
 
     let (command, headers) = (
@@ -107,29 +106,30 @@ pub fn parse_frame_stream<'b>(input: &mut Partial<&'b [u8]>) -> PResult<StompFra
     })
 }
 
-fn parse_header(input: &mut Stream) -> PResult<(String, String)> {
+fn parse_header(input: &mut Partial<&[u8]>) -> ModalResult<(String, String)> {
     separated_pair(
-        take_till(0.., [':', '\r', '\n']).and_then(unpeek(unescape)),
+        take_till(0.., [':', '\r', '\n']),
         literal(":"),
-        terminated(till_line_ending, line_ending).and_then(unpeek(unescape)),
+        terminated(till_line_ending, line_ending),
     )
     .parse_next(input)
+    .and_then(|(k, v)| Ok((unescape(k)?, unescape(v)?)))
 }
 
-fn unescape(input: &[u8]) -> IResult<&[u8], String, ContextError> {
-    let mut f = escaped_transform(
+fn unescape(input: &[u8]) -> ModalResult<String, ContextError> {
+    let mut f = escaped(
         take_while(1, |c| c != b'\\'),
         '\\',
         alt((
-            literal("\\").value("\\".as_bytes()),
-            literal("r").value("\r".as_bytes()),
-            literal("n").value("\n".as_bytes()),
-            literal("c").value(":".as_bytes()),
+            literal("\\").value(b'\\'),
+            literal("r").value(b'\r'),
+            literal("n").value(b'\n'),
+            literal("c").value(b':'),
         )),
     )
     .try_map(String::from_utf8);
 
-    f.parse_peek(input)
+    f.parse_peek(input).map(|it| it.1)
 }
 
 fn get_content_length_header(body: &[u8]) -> Vec<u8> {
