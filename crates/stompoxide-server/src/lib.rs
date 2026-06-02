@@ -497,26 +497,32 @@ impl StompServer {
         let server_cx = 5000;
         let server_cy = 5000;
 
-        let outgoing_hb = if server_cx > 0 && client_cy > 0 {
+        let mut outgoing_hb = if server_cx > 0 && client_cy > 0 {
             std::cmp::max(server_cx, client_cy)
         } else {
             0
         };
 
-        let incoming_hb = if server_cy > 0 && client_cx > 0 {
+        let mut incoming_hb = if server_cy > 0 && client_cx > 0 {
             std::cmp::max(server_cy, client_cx)
         } else {
             0
         };
 
+        if negotiated_version == StompVersion::V1_0 {
+            outgoing_hb = 0;
+            incoming_hb = 0;
+        }
+
         // Send CONNECTED frame
-        let connected_headers = vec![
-            ("version".to_string(), negotiated_version_str.to_string()),
-            (
+        let mut connected_headers =
+            vec![("version".to_string(), negotiated_version_str.to_string())];
+        if negotiated_version != StompVersion::V1_0 {
+            connected_headers.push((
                 "heart-beat".to_string(),
                 format!("{},{}", server_cx, server_cy),
-            ),
-        ];
+            ));
+        }
 
         let connected_frame = StompFrame {
             command: Cow::Borrowed("CONNECTED"),

@@ -437,13 +437,22 @@
                 </div>
                 <div class="form-row">
                     <div class="form-group">
+                        <label for="stompVersion">STOMP Version</label>
+                        <select id="stompVersion">
+                            <option value="all">Auto (1.0, 1.1, 1.2)</option>
+                            <option value="1.2">STOMP 1.2 Only</option>
+                            <option value="1.1">STOMP 1.1 Only</option>
+                            <option value="1.0">STOMP 1.0 Only</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
                         <label for="hbCx">Heartbeat Out (ms)</label>
                         <input type="number" id="hbCx" value="5000" min="0">
                     </div>
-                    <div class="form-group">
-                        <label for="hbCy">Heartbeat In (ms)</label>
-                        <input type="number" id="hbCy" value="5000" min="0">
-                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="hbCy">Heartbeat In (ms)</label>
+                    <input type="number" id="hbCy" value="5000" min="0">
                 </div>
                 <button id="connectBtn" class="btn btn-primary" onclick="toggleConnect()">Connect</button>
             </div>
@@ -551,14 +560,15 @@
                 statusText.textContent = 'Connected';
                 connectBtn.textContent = 'Disconnect';
                 connectBtn.className = 'btn btn-danger';
+                connectBtn.removeAttribute('disabled');
                 subBtn.removeAttribute('disabled');
                 sendBtn.removeAttribute('disabled');
             } else if (state === 'connecting') {
                 statusBadge.className = 'status-badge connecting';
                 statusText.textContent = 'Connecting...';
-                connectBtn.textContent = 'Connecting...';
-                connectBtn.className = 'btn btn-secondary';
-                connectBtn.setAttribute('disabled', 'true');
+                connectBtn.textContent = 'Cancel';
+                connectBtn.className = 'btn btn-danger';
+                connectBtn.removeAttribute('disabled');
                 subBtn.setAttribute('disabled', 'true');
                 sendBtn.setAttribute('disabled', 'true');
             } else {
@@ -577,9 +587,12 @@
         }
 
         function toggleConnect() {
-            if (stompClient && stompClient.connected) {
+            if (stompClient && (stompClient.connected || stompClient.active)) {
                 log('info', 'System', 'Disconnecting client...');
-                stompClient.deactivate();
+                stompClient.deactivate().then(() => {
+                    log('info', 'System', 'STOMP client deactivated.');
+                    updateUIState('disconnected');
+                });
             } else {
                 connect();
             }
@@ -591,8 +604,13 @@
             const passcode = document.getElementById('passcode').value;
             const hbCx = parseInt(document.getElementById('hbCx').value) || 0;
             const hbCy = parseInt(document.getElementById('hbCy').value) || 0;
+            const stompVersion = document.getElementById('stompVersion').value;
 
-            log('info', 'System', `Initiating connection to ${wsUrl}...`);
+            const versions = stompVersion === 'all'
+                ? ['1.0', '1.1', '1.2']
+                : [stompVersion];
+
+            log('info', 'System', `Initiating connection to ${wsUrl} (negotiating version: ${stompVersion})...`);
             updateUIState('connecting');
 
             stompClient = new StompJs.Client({
@@ -601,6 +619,7 @@
                     login: login || undefined,
                     passcode: passcode || undefined
                 },
+                stompVersions: new StompJs.Versions(versions),
                 heartbeatIncoming: hbCy,
                 heartbeatOutgoing: hbCx,
                 debug: function (str) {
