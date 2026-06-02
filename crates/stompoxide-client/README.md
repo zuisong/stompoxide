@@ -5,6 +5,9 @@
 It can connect over any stream that implements `AsyncRead + AsyncWrite`, which
 makes it usable with TCP sockets and adapted WebSocket streams.
 
+By default, the client offers STOMP `1.0,1.1,1.2` and uses the version selected
+by the server to encode headers, heartbeats, and ACK/NACK frames.
+
 ## Example
 
 ```rust
@@ -42,6 +45,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if let Some(frame) = subscription.next().await {
         println!("received frame: {:?}", frame.command);
+        if let Some(ack_id) = frame.get_header("ack") {
+            sender.ack(ack_id).await?;
+        }
     }
 
     Ok(())
@@ -51,6 +57,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ## Behavior
 
 - Sends a STOMP `CONNECT` frame during connection setup.
+- Negotiates STOMP 1.0, 1.1, and 1.2. If `accept_versions` is exactly
+  `["1.0"]`, the client sends a STOMP 1.0-style `CONNECT` frame without
+  `accept-version`, `host`, or `heart-beat`.
 - Negotiates incoming and outgoing heartbeats from the `CONNECTED` frame.
 - Sends raw EOL heartbeats and flushes the stream.
 - Ignores heartbeat frames while waiting for the initial `CONNECTED` frame.
@@ -58,9 +67,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   creating subscription streams.
 - Sends messages with `SendRequest`, including custom headers and receipt
   headers.
+- Adds a `transaction` header to `SEND` frames with
+  `SendRequest::transaction(...)`.
 - Subscribes with `SubscribeRequest`, including custom ids, headers, and
   `AckMode`.
 - Exposes each subscription as an async stream of `MESSAGE` frames.
+- Sends `ACK` and `NACK` frames with protocol-specific header formats:
+  - STOMP 1.0 `ACK` uses `message-id`; `NACK` returns a local protocol error.
+  - STOMP 1.1 `ACK` and `NACK` use `message-id` plus `subscription`.
+  - STOMP 1.2 `ACK` and `NACK` use `id`, matching the `MESSAGE` frame's `ack`
+    header.
+- Provides `ack_with_subscription(...)` and `nack_with_subscription(...)` for
+  STOMP 1.1, plus transaction-aware variants:
+  `ack_in_transaction(...)`, `nack_in_transaction(...)`,
+  `ack_with_subscription_in_transaction(...)`, and
+  `nack_with_subscription_in_transaction(...)`.
+- Sends `BEGIN`, `COMMIT`, and `ABORT` transaction frames.
 - Sends `UNSUBSCRIBE` when a subscription is dropped.
 
 `send(...).await` confirms that the frame was written to the connection task.
