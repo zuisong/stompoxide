@@ -482,6 +482,17 @@ impl StompServer {
         framed_read.decoder_mut().version = negotiated_version;
         framed_write.encoder_mut().version = negotiated_version;
 
+        // Validate required host header for STOMP 1.1 / 1.2
+        match negotiated_version {
+            StompVersion::V1_0 => (),
+            StompVersion::V1_1 | StompVersion::V1_2 => {
+                if connect_frame.get_header("host").is_none() {
+                    let _ = send_error(&mut framed_write, "Missing required host header").await;
+                    return;
+                }
+            }
+        }
+
         // Negotiate heartbeat.
         let mut client_cx = 0;
         let mut client_cy = 0;

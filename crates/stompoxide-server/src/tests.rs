@@ -253,7 +253,10 @@ async fn test_stompoxide_server_rejects_unknown_send_destination() {
     framed
         .send(StompFrame {
             command: "CONNECT".into(),
-            headers: vec![("accept-version".to_string(), "1.2".to_string())],
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
             body: None,
         })
         .await
@@ -302,7 +305,10 @@ async fn test_stompoxide_server_rejects_unknown_subscribe_destination() {
     framed
         .send(StompFrame {
             command: "CONNECT".into(),
-            headers: vec![("accept-version".to_string(), "1.2".to_string())],
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
             body: None,
         })
         .await
@@ -354,7 +360,10 @@ async fn test_stompoxide_server_rejects_queue_wildcard_subscription() {
     framed
         .send(StompFrame {
             command: "CONNECT".into(),
-            headers: vec![("accept-version".to_string(), "1.2".to_string())],
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
             body: None,
         })
         .await
@@ -434,7 +443,7 @@ async fn test_stompoxide_server_version_negotiation_success() {
     let mut stream = TcpStream::connect(local_addr).await.unwrap();
     // Send CONNECT with version 1.2.
     stream
-        .write_all(b"CONNECT\naccept-version:1.2\n\n\0")
+        .write_all(b"CONNECT\naccept-version:1.2\nhost:localhost\n\n\0")
         .await
         .unwrap();
     stream.flush().await.unwrap();
@@ -468,7 +477,7 @@ async fn test_stompoxide_server_version_negotiation_success_1_1() {
 
     let mut stream = TcpStream::connect(local_addr).await.unwrap();
     stream
-        .write_all(b"CONNECT\naccept-version:1.0,1.1\n\n\0")
+        .write_all(b"CONNECT\naccept-version:1.0,1.1\nhost:localhost\n\n\0")
         .await
         .unwrap();
     stream.flush().await.unwrap();
@@ -507,7 +516,10 @@ async fn test_stompoxide_server_receipt() {
     framed
         .send(StompFrame {
             command: "CONNECT".into(),
-            headers: vec![("accept-version".to_string(), "1.2".to_string())],
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
             body: None,
         })
         .await
@@ -566,6 +578,7 @@ async fn test_duplicate_headers() {
             headers: vec![
                 ("accept-version".to_string(), "1.2".to_string()),
                 ("accept-version".to_string(), "1.0".to_string()),
+                ("host".to_string(), "localhost".to_string()),
             ],
             body: None,
         })
@@ -614,7 +627,10 @@ async fn test_server_ack_nack_and_message_ack_header() {
     framed
         .send(StompFrame {
             command: "CONNECT".into(),
-            headers: vec![("accept-version".to_string(), "1.2".to_string())],
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
             body: None,
         })
         .await
@@ -714,7 +730,10 @@ async fn test_server_message_no_ack_header_for_auto_ack() {
     framed
         .send(StompFrame {
             command: "CONNECT".into(),
-            headers: vec![("accept-version".to_string(), "1.2".to_string())],
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
             body: None,
         })
         .await
