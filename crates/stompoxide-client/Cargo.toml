@@ -7,11 +7,10 @@ license = "MIT"
 
 [dependencies]
 stompoxide-codec = { path = "../stompoxide-codec" }
-tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros"] }
+tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros", "io-util"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 futures-core = "0.3"
-log = "0.4"
 tokio-stream = { version = "0.1", features = ["sync"] }
 
 [dev-dependencies]

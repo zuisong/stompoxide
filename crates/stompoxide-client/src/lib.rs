@@ -182,13 +182,11 @@ enum ClientCmd {
         resp: oneshot::Sender<Result<(), StompError>>,
     },
     Ack {
-        id: String,
-        transaction: Option<String>,
+        request: AckRequest,
         resp: oneshot::Sender<Result<(), StompError>>,
     },
     Nack {
-        id: String,
-        transaction: Option<String>,
+        request: AckRequest,
         resp: oneshot::Sender<Result<(), StompError>>,
     },
     Begin {
@@ -203,6 +201,89 @@ enum ClientCmd {
         transaction_id: String,
         resp: oneshot::Sender<Result<(), StompError>>,
     },
+}
+
+#[derive(Clone, Debug)]
+struct AckRequest {
+    id: String,
+    subscription: Option<String>,
+    transaction: Option<String>,
+}
+
+impl AckRequest {
+    fn new(id: impl Into<String>) -> Self {
+        Self {
+            id: id.into(),
+            subscription: None,
+            transaction: None,
+        }
+    }
+
+    fn subscription(mut self, subscription: impl Into<String>) -> Self {
+        self.subscription = Some(subscription.into());
+        self
+    }
+
+    fn transaction(mut self, transaction: impl Into<String>) -> Self {
+        self.transaction = Some(transaction.into());
+        self
+    }
+}
+
+fn ack_headers(
+    request: AckRequest,
+    negotiated_version: StompVersion,
+) -> Result<Vec<(String, String)>, StompError> {
+    let mut headers = Vec::new();
+    match negotiated_version {
+        StompVersion::V1_0 => {
+            headers.push(("message-id".to_string(), request.id));
+        }
+        StompVersion::V1_1 => {
+            let subscription = request.subscription.ok_or_else(|| {
+                StompError::Protocol("STOMP 1.1 ACK requires a subscription header".to_string())
+            })?;
+            headers.push(("message-id".to_string(), request.id));
+            headers.push(("subscription".to_string(), subscription));
+        }
+        StompVersion::V1_2 => {
+            headers.push(("id".to_string(), request.id));
+        }
+    }
+    if let Some(transaction) = request.transaction {
+        headers.push(("transaction".to_string(), transaction));
+    }
+    Ok(headers)
+}
+
+fn nack_headers(
+    request: AckRequest,
+    negotiated_version: StompVersion,
+) -> Result<Vec<(String, String)>, StompError> {
+    if negotiated_version == StompVersion::V1_0 {
+        return Err(StompError::Protocol(
+            "STOMP 1.0 does not support NACK".to_string(),
+        ));
+    }
+
+    let mut headers = Vec::new();
+    match negotiated_version {
+        StompVersion::V1_1 => {
+            let subscription = request.subscription.ok_or_else(|| {
+                StompError::Protocol("STOMP 1.1 NACK requires a subscription header".to_string())
+            })?;
+            headers.push(("message-id".to_string(), request.id));
+            headers.push(("subscription".to_string(), subscription));
+        }
+        StompVersion::V1_2 => {
+            headers.push(("id".to_string(), request.id));
+        }
+        StompVersion::V1_0 => unreachable!(),
+    }
+    if let Some(transaction) = request.transaction {
+        headers.push(("transaction".to_string(), transaction));
+    }
+    Ok(headers)
 }
 
 #[derive(Clone)]
@@ -236,23 +317,25 @@ impl StompClient {
         let mut framed_write = FramedWrite::new(writer, StompCodec::default());
 
         // Send CONNECT frame
-        let mut headers = vec![
-            (
+        let is_1_0_only = config.accept_versions.len() == 1 && config.accept_versions[0] == "1.0";
+        let mut headers = Vec::new();
+        if !is_1_0_only {
+            headers.push((
                 "accept-version".to_string(),
                 config.accept_versions.join(","),
-            ),
-            ("host".to_string(), config.host.clone()),
-        ];
+            ));
+            headers.push(("host".to_string(), config.host.clone()));
+            headers.push((
+                "heart-beat".to_string(),
+                format!("{},{}", config.heartbeat_cx, config.heartbeat_cy),
+            ));
+        }
         if let Some(ref login) = config.login {
             headers.push(("login".to_string(), login.clone()));
         }
         if let Some(ref passcode) = config.passcode {
             headers.push(("passcode".to_string(), passcode.clone()));
         }
-        headers.push((
-            "heart-beat".to_string(),
-            format!("{},{}", config.heartbeat_cx, config.heartbeat_cy),
-        ));
 
         let connect_frame = StompFrame {
             command: Cow::Borrowed("CONNECT"),
@@ -307,18 +390,23 @@ impl StompClient {
 
         // cx, cy negotiated intervals:
         // Outgoing heartbeat: client wants to send every config.heartbeat_cx, server expects every hb_cy.
-        let outgoing_interval = if config.heartbeat_cx > 0 && hb_cy > 0 {
+        let mut outgoing_interval = if config.heartbeat_cx > 0 && hb_cy > 0 {
             std::cmp::max(config.heartbeat_cx, hb_cy)
         } else {
             0
         };
 
         // Incoming heartbeat: client expects every config.heartbeat_cy, server wants to send every hb_cx.
-        let incoming_interval = if config.heartbeat_cy > 0 && hb_cx > 0 {
+        let mut incoming_interval = if config.heartbeat_cy > 0 && hb_cx > 0 {
             std::cmp::max(config.heartbeat_cy, hb_cx)
         } else {
             0
         };
+
+        if negotiated_version == StompVersion::V1_0 {
+            outgoing_interval = 0;
+            incoming_interval = 0;
+        }
 
         let (cmd_tx, cmd_rx) = mpsc::channel(100);
         let client = Self {
@@ -334,6 +422,7 @@ impl StompClient {
                 cmd_rx,
                 outgoing_interval,
                 incoming_interval,
+                negotiated_version,
             )
             .await
         });
@@ -377,6 +466,14 @@ impl StompClient {
         self.sender().ack(id).await
     }
 
+    pub async fn ack_with_subscription(
+        &self,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+    ) -> Result<(), StompError> {
+        self.sender().ack_with_subscription(id, subscription).await
+    }
+
     pub async fn ack_in_transaction(
         &self,
         id: impl Into<String>,
@@ -385,8 +482,27 @@ impl StompClient {
         self.sender().ack_in_transaction(id, transaction_id).await
     }
 
+    pub async fn ack_with_subscription_in_transaction(
+        &self,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+        transaction_id: impl Into<String>,
+    ) -> Result<(), StompError> {
+        self.sender()
+            .ack_with_subscription_in_transaction(id, subscription, transaction_id)
+            .await
+    }
+
     pub async fn nack(&self, id: impl Into<String>) -> Result<(), StompError> {
         self.sender().nack(id).await
+    }
+
+    pub async fn nack_with_subscription(
+        &self,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+    ) -> Result<(), StompError> {
+        self.sender().nack_with_subscription(id, subscription).await
     }
 
     pub async fn nack_in_transaction(
@@ -395,6 +511,17 @@ impl StompClient {
         transaction_id: impl Into<String>,
     ) -> Result<(), StompError> {
         self.sender().nack_in_transaction(id, transaction_id).await
+    }
+
+    pub async fn nack_with_subscription_in_transaction(
+        &self,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+        transaction_id: impl Into<String>,
+    ) -> Result<(), StompError> {
+        self.sender()
+            .nack_with_subscription_in_transaction(id, subscription, transaction_id)
+            .await
     }
 
     pub async fn begin(&self, transaction_id: impl Into<String>) -> Result<(), StompError> {
@@ -425,7 +552,16 @@ impl StompSender {
     }
 
     pub async fn ack(&self, id: impl Into<String>) -> Result<(), StompError> {
-        self.ack_internal(id.into(), None).await
+        self.ack_internal(AckRequest::new(id)).await
+    }
+
+    pub async fn ack_with_subscription(
+        &self,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+    ) -> Result<(), StompError> {
+        self.ack_internal(AckRequest::new(id).subscription(subscription))
+            .await
     }
 
     pub async fn ack_in_transaction(
@@ -433,20 +569,29 @@ impl StompSender {
         id: impl Into<String>,
         transaction_id: impl Into<String>,
     ) -> Result<(), StompError> {
-        self.ack_internal(id.into(), Some(transaction_id.into()))
+        self.ack_internal(AckRequest::new(id).transaction(transaction_id))
             .await
     }
 
-    async fn ack_internal(
+    pub async fn ack_with_subscription_in_transaction(
         &self,
-        id: String,
-        transaction: Option<String>,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+        transaction_id: impl Into<String>,
     ) -> Result<(), StompError> {
+        self.ack_internal(
+            AckRequest::new(id)
+                .subscription(subscription)
+                .transaction(transaction_id),
+        )
+        .await
+    }
+
+    async fn ack_internal(&self, request: AckRequest) -> Result<(), StompError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.cmd_tx
             .send(ClientCmd::Ack {
-                id,
-                transaction,
+                request,
                 resp: resp_tx,
             })
             .await
@@ -456,7 +601,16 @@ impl StompSender {
     }
 
     pub async fn nack(&self, id: impl Into<String>) -> Result<(), StompError> {
-        self.nack_internal(id.into(), None).await
+        self.nack_internal(AckRequest::new(id)).await
+    }
+
+    pub async fn nack_with_subscription(
+        &self,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+    ) -> Result<(), StompError> {
+        self.nack_internal(AckRequest::new(id).subscription(subscription))
+            .await
     }
 
     pub async fn nack_in_transaction(
@@ -464,20 +618,29 @@ impl StompSender {
         id: impl Into<String>,
         transaction_id: impl Into<String>,
     ) -> Result<(), StompError> {
-        self.nack_internal(id.into(), Some(transaction_id.into()))
+        self.nack_internal(AckRequest::new(id).transaction(transaction_id))
             .await
     }
 
-    async fn nack_internal(
+    pub async fn nack_with_subscription_in_transaction(
         &self,
-        id: String,
-        transaction: Option<String>,
+        id: impl Into<String>,
+        subscription: impl Into<String>,
+        transaction_id: impl Into<String>,
     ) -> Result<(), StompError> {
+        self.nack_internal(
+            AckRequest::new(id)
+                .subscription(subscription)
+                .transaction(transaction_id),
+        )
+        .await
+    }
+
+    async fn nack_internal(&self, request: AckRequest) -> Result<(), StompError> {
         let (resp_tx, resp_rx) = oneshot::channel();
         self.cmd_tx
             .send(ClientCmd::Nack {
-                id,
-                transaction,
+                request,
                 resp: resp_tx,
             })
             .await
@@ -591,6 +754,7 @@ async fn run_connection_loop<R, W>(
     mut cmd_rx: mpsc::Receiver<ClientCmd>,
     outgoing_hb: u32,
     incoming_hb: u32,
+    negotiated_version: StompVersion,
 ) -> Result<(), StompError>
 where
     R: AsyncRead + Unpin + Send + 'static,
@@ -681,11 +845,14 @@ where
                             let res = writer.send(unsubscribe_frame).await.map_err(StompError::Io);
                             let _ = resp.send(res);
                         }
-                        ClientCmd::Ack { id, transaction, resp } => {
-                            let mut headers = vec![("id".to_string(), id)];
-                            if let Some(t_id) = transaction {
-                                headers.push(("transaction".to_string(), t_id));
-                            }
+                        ClientCmd::Ack { request, resp } => {
+                            let headers = match ack_headers(request, negotiated_version) {
+                                Ok(headers) => headers,
+                                Err(err) => {
+                                    let _ = resp.send(Err(err));
+                                    continue;
+                                }
+                            };
                             let frame = StompFrame {
                                 command: Cow::Borrowed("ACK"),
                                 headers,
@@ -694,11 +861,14 @@ where
                             let res = writer.send(frame).await.map_err(StompError::Io);
                             let _ = resp.send(res);
                         }
-                        ClientCmd::Nack { id, transaction, resp } => {
-                            let mut headers = vec![("id".to_string(), id)];
-                            if let Some(t_id) = transaction {
-                                headers.push(("transaction".to_string(), t_id));
-                            }
+                        ClientCmd::Nack { request, resp } => {
+                            let headers = match nack_headers(request, negotiated_version) {
+                                Ok(headers) => headers,
+                                Err(err) => {
+                                    let _ = resp.send(Err(err));
+                                    continue;
+                                }
+                            };
                             let frame = StompFrame {
                                 command: Cow::Borrowed("NACK"),
                                 headers,

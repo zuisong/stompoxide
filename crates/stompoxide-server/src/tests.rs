@@ -980,3 +980,257 @@ async fn test_stompoxide_server_authentication_failure() {
     let client = StompClient::connect(stream, config).await;
     assert!(client.is_err());
 }
+
+#[tokio::test]
+async fn test_stomp_1_1_ack_nack_requires_subscription_regression() {
+    let server = StompServer::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            server_clone.handle_connection(socket).await;
+        }
+    });
+
+    let stream = TcpStream::connect(local_addr).await.unwrap();
+    let mut framed = Framed::new(stream, StompCodec::default());
+
+    // Connect as 1.1
+    framed
+        .send(StompFrame {
+            command: "CONNECT".into(),
+            headers: vec![
+                ("accept-version".to_string(), "1.1".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let connected = framed.next().await.unwrap().unwrap();
+    assert_eq!(connected.command, "CONNECTED");
+
+    // Send ACK missing subscription
+    framed
+        .send(StompFrame {
+            command: "ACK".into(),
+            headers: vec![("message-id".to_string(), "some-msg-id".to_string())],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let error_frame = framed.next().await.unwrap().unwrap();
+    assert_eq!(error_frame.command, "ERROR");
+    assert!(
+        error_frame
+            .get_header("message")
+            .unwrap()
+            .contains("Missing subscription header in ACK for STOMP 1.1")
+    );
+}
+
+#[tokio::test]
+async fn test_stomp_1_0_nack_rejected_regression() {
+    let server = StompServer::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            server_clone.handle_connection(socket).await;
+        }
+    });
+
+    let stream = TcpStream::connect(local_addr).await.unwrap();
+    let mut framed = Framed::new(stream, StompCodec::default());
+
+    // Connect as 1.0 (empty version or no accept-version)
+    framed
+        .send(StompFrame {
+            command: "CONNECT".into(),
+            headers: vec![],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let connected = framed.next().await.unwrap().unwrap();
+    assert_eq!(connected.command, "CONNECTED");
+
+    // Send NACK (1.0 doesn't support it)
+    framed
+        .send(StompFrame {
+            command: "NACK".into(),
+            headers: vec![("message-id".to_string(), "some-msg-id".to_string())],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let error_frame = framed.next().await.unwrap().unwrap();
+    assert_eq!(error_frame.command, "ERROR");
+    assert!(
+        error_frame
+            .get_header("message")
+            .unwrap()
+            .contains("STOMP 1.0 does not support NACK")
+    );
+}
+
+#[tokio::test]
+async fn test_client_stomp_1_1_enforces_subscription_regression() {
+    use stompoxide_client::{ClientConfig, StompClient, StompError};
+
+    let server = StompServer::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            server_clone.handle_connection(socket).await;
+        }
+    });
+
+    let stream = TcpStream::connect(local_addr).await.unwrap();
+    let config = ClientConfig {
+        accept_versions: vec!["1.1".to_string()],
+        ..ClientConfig::default()
+    };
+    let (client, _handle) = StompClient::connect(stream, config).await.unwrap();
+
+    // Call raw ack (missing subscription) -> should fail locally
+    let res = client.ack("some-msg-id").await;
+    assert!(res.is_err());
+    if let Err(StompError::Protocol(msg)) = res {
+        assert!(msg.contains("STOMP 1.1 ACK requires a subscription header"));
+    } else {
+        panic!("expected protocol error");
+    }
+
+    // Call raw nack (missing subscription) -> should fail locally
+    let res_nack = client.nack("some-msg-id").await;
+    assert!(res_nack.is_err());
+    if let Err(StompError::Protocol(msg)) = res_nack {
+        assert!(msg.contains("STOMP 1.1 NACK requires a subscription header"));
+    } else {
+        panic!("expected protocol error");
+    }
+}
+
+#[tokio::test]
+async fn test_stomp_1_2_ack_requires_id_regression() {
+    let server = StompServer::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            server_clone.handle_connection(socket).await;
+        }
+    });
+
+    let stream = TcpStream::connect(local_addr).await.unwrap();
+    let mut framed = Framed::new(stream, StompCodec::default());
+
+    framed
+        .send(StompFrame {
+            command: "CONNECT".into(),
+            headers: vec![
+                ("accept-version".to_string(), "1.2".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let connected = framed.next().await.unwrap().unwrap();
+    assert_eq!(connected.command, "CONNECTED");
+
+    framed
+        .send(StompFrame {
+            command: "ACK".into(),
+            headers: vec![("message-id".to_string(), "some-msg-id".to_string())],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let error_frame = framed.next().await.unwrap().unwrap();
+    assert_eq!(error_frame.command, "ERROR");
+    assert!(
+        error_frame
+            .get_header("message")
+            .unwrap()
+            .contains("Missing id header in ACK")
+    );
+}
+
+#[tokio::test]
+async fn test_stomp_1_1_transaction_ack_requires_subscription_regression() {
+    let server = StompServer::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let server_clone = server.clone();
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            server_clone.handle_connection(socket).await;
+        }
+    });
+
+    let stream = TcpStream::connect(local_addr).await.unwrap();
+    let mut framed = Framed::new(stream, StompCodec::default());
+
+    framed
+        .send(StompFrame {
+            command: "CONNECT".into(),
+            headers: vec![
+                ("accept-version".to_string(), "1.1".to_string()),
+                ("host".to_string(), "localhost".to_string()),
+            ],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let connected = framed.next().await.unwrap().unwrap();
+    assert_eq!(connected.command, "CONNECTED");
+
+    framed
+        .send(StompFrame {
+            command: "BEGIN".into(),
+            headers: vec![("transaction".to_string(), "tx-1".to_string())],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    framed
+        .send(StompFrame {
+            command: "ACK".into(),
+            headers: vec![
+                ("message-id".to_string(), "some-msg-id".to_string()),
+                ("transaction".to_string(), "tx-1".to_string()),
+            ],
+            body: None,
+        })
+        .await
+        .unwrap();
+
+    let error_frame = framed.next().await.unwrap().unwrap();
+    assert_eq!(error_frame.command, "ERROR");
+    assert!(
+        error_frame
+            .get_header("message")
+            .unwrap()
+            .contains("Missing subscription header in ACK for STOMP 1.1")
+    );
+}

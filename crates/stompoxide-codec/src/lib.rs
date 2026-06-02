@@ -59,8 +59,8 @@ impl StompFrame<'_> {
                 match version {
                     StompVersion::V1_0 => std::slice::from_ref(b),
                     StompVersion::V1_1 => match b {
-                        b'\r' => b"\\r",
                         b'\n' => b"\\n",
+                        b':' => b"\\c",
                         b'\\' => b"\\\\",
                         bytes => std::slice::from_ref(bytes),
                     },
@@ -202,9 +202,9 @@ fn unescape(input: &[u8], version: StompVersion) -> PResult<String> {
                 return Err(winnow::error::ErrMode::Backtrack(ContextError::new()));
             }
             match input[i + 1] {
-                b'r' => s.push('\r'),
+                b'r' if version == StompVersion::V1_2 => s.push('\r'),
                 b'n' => s.push('\n'),
-                b'c' if version == StompVersion::V1_2 => s.push(':'),
+                b'c' => s.push(':'),
                 b'\\' => s.push('\\'),
                 _ => {
                     return Err(winnow::error::ErrMode::Backtrack(ContextError::new()));

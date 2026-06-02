@@ -32,6 +32,7 @@ pub struct SubscriptionInfo {
     pub sub_id: String,
     pub sender: mpsc::UnboundedSender<StompFrame<'static>>,
     pub ack_mode: String,
+    pub version: StompVersion,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +49,41 @@ struct PendingAckInfo {
     frame: StompFrame<'static>,
     ack_mode: String,
     time_sent: std::time::Instant,
+    message_id: String,
+}
+
+struct AckTarget<'a> {
+    id: &'a str,
+    subscription: Option<&'a str>,
+    version: StompVersion,
+}
+
+fn find_pending_ack(
+    pending_acks: &HashMap<String, PendingAckInfo>,
+    conn_id: Uuid,
+    target: AckTarget<'_>,
+) -> Option<String> {
+    match target.version {
+        StompVersion::V1_2 => pending_acks
+            .get_key_value(target.id)
+            .filter(|(_, info)| info.conn_id == conn_id)
+            .map(|(delivery_id, _)| delivery_id.clone()),
+        StompVersion::V1_1 => {
+            let subscription = target.subscription?;
+            pending_acks
+                .iter()
+                .find(|(_, info)| {
+                    info.conn_id == conn_id
+                        && info.message_id == target.id
+                        && info.sub_id == subscription
+                })
+                .map(|(delivery_id, _)| delivery_id.clone())
+        }
+        StompVersion::V1_0 => pending_acks
+            .iter()
+            .find(|(_, info)| info.conn_id == conn_id && info.message_id == target.id)
+            .map(|(delivery_id, _)| delivery_id.clone()),
+    }
 }
 
 #[derive(Default)]
@@ -79,6 +115,7 @@ impl PubSubRouter {
         sub_id: String,
         destination: String,
         ack_mode: String,
+        version: StompVersion,
         sender: mpsc::UnboundedSender<StompFrame<'static>>,
     ) -> Result<(), &'static str> {
         let kind = classify_destination(&destination).ok_or("Unknown destination")?;
@@ -92,6 +129,7 @@ impl PubSubRouter {
             sub_id,
             sender,
             ack_mode,
+            version,
         };
         match kind {
             DestinationKind::Topic => state
@@ -162,10 +200,10 @@ impl PubSubRouter {
         }
     }
 
-    pub async fn handle_ack(&self, conn_id: Uuid, ack_id: &str) {
+    async fn handle_ack(&self, conn_id: Uuid, target: AckTarget<'_>) {
         let mut state = self.state.write().await;
-        if let Some(pending) = state.pending_acks.remove(ack_id) {
-            if pending.conn_id == conn_id {
+        if let Some(del_id) = find_pending_ack(&state.pending_acks, conn_id, target) {
+            if let Some(pending) = state.pending_acks.remove(&del_id) {
                 if pending.ack_mode == "client" {
                     let time_sent = pending.time_sent;
                     let sub_id = pending.sub_id;
@@ -173,18 +211,16 @@ impl PubSubRouter {
                         !(v.conn_id == conn_id && v.sub_id == sub_id && v.time_sent <= time_sent)
                     });
                 }
-            } else {
-                state.pending_acks.insert(ack_id.to_string(), pending);
             }
         }
     }
 
-    pub async fn handle_nack(&self, conn_id: Uuid, ack_id: &str) {
+    async fn handle_nack(&self, conn_id: Uuid, target: AckTarget<'_>) {
         let mut to_republish = Vec::new();
         {
             let mut state = self.state.write().await;
-            if let Some(pending) = state.pending_acks.remove(ack_id) {
-                if pending.conn_id == conn_id {
+            if let Some(del_id) = find_pending_ack(&state.pending_acks, conn_id, target) {
+                if let Some(pending) = state.pending_acks.remove(&del_id) {
                     if pending.ack_mode == "client" {
                         let time_sent = pending.time_sent;
                         let sub_id = pending.sub_id.clone();
@@ -207,8 +243,6 @@ impl PubSubRouter {
                     } else {
                         to_republish.push((pending.destination, pending.frame));
                     }
-                } else {
-                    state.pending_acks.insert(ack_id.to_string(), pending);
                 }
             }
         }
@@ -239,22 +273,29 @@ impl PubSubRouter {
                                 sub.conn_id,
                                 sub.sub_id.clone(),
                                 sub.ack_mode.clone(),
+                                sub.version,
                                 sub.sender.clone(),
                             ));
                         }
                     }
                 }
-                for (conn_id, sub_id, ack_mode, sender) in target_subs {
+                for (conn_id, sub_id, ack_mode, version, sender) in target_subs {
                     let mut f = frame.clone();
                     f.headers.retain(|(k, _)| k != "subscription");
                     f.headers.push(("subscription".to_string(), sub_id.clone()));
                     if ack_mode == "client" || ack_mode == "client-individual" {
-                        let ack_id = Uuid::new_v4().to_string();
-                        f.headers.retain(|(k, _)| k != "ack");
-                        f.headers.push(("ack".to_string(), ack_id.clone()));
+                        let delivery_id = Uuid::new_v4().to_string();
+                        if version == StompVersion::V1_2 {
+                            f.headers.retain(|(k, _)| k != "ack");
+                            f.headers.push(("ack".to_string(), delivery_id.clone()));
+                        }
+                        let message_id = f
+                            .get_header("message-id")
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
 
                         pending_acks.insert(
-                            ack_id,
+                            delivery_id,
                             PendingAckInfo {
                                 conn_id,
                                 sub_id,
@@ -262,6 +303,7 @@ impl PubSubRouter {
                                 frame: frame.clone(),
                                 ack_mode,
                                 time_sent: std::time::Instant::now(),
+                                message_id,
                             },
                         );
                     }
@@ -281,12 +323,18 @@ impl PubSubRouter {
                     f.headers
                         .push(("subscription".to_string(), sub.sub_id.clone()));
                     if sub.ack_mode == "client" || sub.ack_mode == "client-individual" {
-                        let ack_id = Uuid::new_v4().to_string();
-                        f.headers.retain(|(k, _)| k != "ack");
-                        f.headers.push(("ack".to_string(), ack_id.clone()));
+                        let delivery_id = Uuid::new_v4().to_string();
+                        if sub.version == StompVersion::V1_2 {
+                            f.headers.retain(|(k, _)| k != "ack");
+                            f.headers.push(("ack".to_string(), delivery_id.clone()));
+                        }
+                        let message_id = f
+                            .get_header("message-id")
+                            .map(|s| s.to_string())
+                            .unwrap_or_default();
 
                         pending_acks.insert(
-                            ack_id,
+                            delivery_id,
                             PendingAckInfo {
                                 conn_id: sub.conn_id,
                                 sub_id: sub.sub_id.clone(),
@@ -294,6 +342,7 @@ impl PubSubRouter {
                                 frame,
                                 ack_mode: sub.ack_mode.clone(),
                                 time_sent: std::time::Instant::now(),
+                                message_id,
                             },
                         );
                     }
@@ -339,6 +388,45 @@ fn matches_destination(pattern: &str, destination: &str) -> bool {
         }
     }
     pat_segs.len() == dest_segs.len()
+}
+
+fn ack_id_and_subscription<'a>(
+    frame: &'a StompFrame<'_>,
+    version: StompVersion,
+) -> Result<AckTarget<'a>, String> {
+    let (id, subscription) = match version {
+        StompVersion::V1_0 => {
+            if frame.command == "NACK" {
+                return Err("STOMP 1.0 does not support NACK".to_string());
+            }
+            frame
+                .get_header("message-id")
+                .map(|id| (id, None))
+                .ok_or_else(|| format!("Missing message-id header in {}", frame.command))
+        }
+        StompVersion::V1_1 => {
+            let message_id = frame
+                .get_header("message-id")
+                .ok_or_else(|| format!("Missing message-id header in {}", frame.command))?;
+            let subscription = frame.get_header("subscription").ok_or_else(|| {
+                format!(
+                    "Missing subscription header in {} for STOMP 1.1",
+                    frame.command
+                )
+            })?;
+            Ok((message_id, Some(subscription)))
+        }
+        StompVersion::V1_2 => frame
+            .get_header("id")
+            .map(|id| (id, frame.get_header("subscription")))
+            .ok_or_else(|| format!("Missing id header in {}", frame.command)),
+    }?;
+
+    Ok(AckTarget {
+        id,
+        subscription,
+        version,
+    })
 }
 
 pub type StompAuthenticator = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
@@ -526,14 +614,18 @@ impl StompServer {
         }
 
         // Send CONNECTED frame
-        let mut connected_headers =
-            vec![("version".to_string(), negotiated_version_str.to_string())];
+        let mut connected_headers = Vec::new();
         if negotiated_version != StompVersion::V1_0 {
+            connected_headers.push(("version".to_string(), negotiated_version_str.to_string()));
             connected_headers.push((
                 "heart-beat".to_string(),
                 format!("{},{}", server_cx, server_cy),
             ));
+            if negotiated_version == StompVersion::V1_2 {
+                connected_headers.push(("server".to_string(), "stompoxide/0.1.0".to_string()));
+            }
         }
+        connected_headers.push(("session".to_string(), conn_id.to_string()));
 
         let connected_frame = StompFrame {
             command: Cow::Borrowed("CONNECTED"),
@@ -652,6 +744,19 @@ impl StompServer {
                         frame.command
                     );
                     let receipt_id = frame.get_header("receipt").map(|s| s.to_string());
+
+                    // Validate ACK / NACK headers before immediate handling or transaction buffering.
+                    if frame.command == "ACK" || frame.command == "NACK" {
+                        if let Err(message) = ack_id_and_subscription(&frame, negotiated_version) {
+                            let _ = send_command_frame(
+                                &write_cmd_tx,
+                                create_error_frame(&message),
+                                true,
+                            )
+                            .await;
+                            break;
+                        }
+                    }
 
                     let mut should_process_normally = true;
                     let mut should_send_receipt = true;
@@ -783,13 +888,43 @@ impl StompServer {
                                                 }
                                             }
                                             "ACK" => {
-                                                if let Some(id) = f.get_header("id") {
-                                                    router.handle_ack(conn_id, id).await;
+                                                match ack_id_and_subscription(
+                                                    &f,
+                                                    negotiated_version,
+                                                ) {
+                                                    Ok(target) => {
+                                                        router.handle_ack(conn_id, target).await;
+                                                    }
+                                                    Err(message) => {
+                                                        let _ = send_command_frame(
+                                                            &write_cmd_tx,
+                                                            create_error_frame(&message),
+                                                            true,
+                                                        )
+                                                        .await;
+                                                        commit_failed = true;
+                                                        break;
+                                                    }
                                                 }
                                             }
                                             "NACK" => {
-                                                if let Some(id) = f.get_header("id") {
-                                                    router.handle_nack(conn_id, id).await;
+                                                match ack_id_and_subscription(
+                                                    &f,
+                                                    negotiated_version,
+                                                ) {
+                                                    Ok(target) => {
+                                                        router.handle_nack(conn_id, target).await;
+                                                    }
+                                                    Err(message) => {
+                                                        let _ = send_command_frame(
+                                                            &write_cmd_tx,
+                                                            create_error_frame(&message),
+                                                            true,
+                                                        )
+                                                        .await;
+                                                        commit_failed = true;
+                                                        break;
+                                                    }
                                                 }
                                             }
                                             _ => {}
@@ -852,9 +987,29 @@ impl StompServer {
 
                                 let ack_mode =
                                     frame.get_header("ack").unwrap_or("auto").to_string();
+                                if negotiated_version == StompVersion::V1_0
+                                    && ack_mode == "client-individual"
+                                {
+                                    let _ = send_command_frame(
+                                        &write_cmd_tx,
+                                        create_error_frame(
+                                            "STOMP 1.0 does not support client-individual ack mode",
+                                        ),
+                                        true,
+                                    )
+                                    .await;
+                                    break;
+                                }
                                 if let (Some(sub_id), Some(dest)) = (id, destination) {
                                     if let Err(message) = router
-                                        .subscribe(conn_id, sub_id, dest, ack_mode, out_tx.clone())
+                                        .subscribe(
+                                            conn_id,
+                                            sub_id,
+                                            dest,
+                                            ack_mode,
+                                            negotiated_version,
+                                            out_tx.clone(),
+                                        )
                                         .await
                                     {
                                         let _ = send_command_frame(
@@ -940,30 +1095,14 @@ impl StompServer {
                                 break;
                             }
                             "ACK" => {
-                                if let Some(id) = frame.get_header("id") {
-                                    router.handle_ack(conn_id, id).await;
-                                } else {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame("Missing id header in ACK"),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
+                                let target = ack_id_and_subscription(&frame, negotiated_version)
+                                    .expect("ACK was validated before handling");
+                                router.handle_ack(conn_id, target).await;
                             }
                             "NACK" => {
-                                if let Some(id) = frame.get_header("id") {
-                                    router.handle_nack(conn_id, id).await;
-                                } else {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame("Missing id header in NACK"),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
+                                let target = ack_id_and_subscription(&frame, negotiated_version)
+                                    .expect("NACK was validated before handling");
+                                router.handle_nack(conn_id, target).await;
                             }
                             "HEARTBEAT" => {
                                 // Heartbeat, do nothing

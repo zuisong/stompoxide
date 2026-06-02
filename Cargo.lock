@@ -687,7 +687,6 @@ version = "0.1.0"
 dependencies = [
  "futures-core",
  "futures-util",
- "log",
  "stompoxide-codec",
  "tokio",
  "tokio-stream",
@@ -701,7 +700,6 @@ dependencies = [
  "assert_matches2",
  "bytes",
  "pretty_assertions",
- "tokio",
  "tokio-util",
  "winnow",
 ]

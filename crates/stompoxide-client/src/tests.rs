@@ -307,3 +307,67 @@ async fn test_client_send_ack_nack() {
     assert_eq!(nack_received.command, "NACK");
     assert_eq!(nack_received.get_header("id"), Some("msg-2"));
 }
+
+#[tokio::test]
+async fn test_client_stomp_1_1_ack_nack_with_subscription_in_transaction() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let (frame_tx, mut frame_rx) = mpsc::channel(10);
+
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            let mut framed = Framed::new(socket, StompCodec::default());
+            let connect = framed.next().await.unwrap().unwrap();
+            assert_eq!(connect.command, "CONNECT");
+
+            framed
+                .send(StompFrame {
+                    command: "CONNECTED".into(),
+                    headers: vec![("version".to_string(), "1.1".to_string())],
+                    body: None,
+                })
+                .await
+                .unwrap();
+
+            frame_tx
+                .send(framed.next().await.unwrap().unwrap())
+                .await
+                .unwrap();
+            frame_tx
+                .send(framed.next().await.unwrap().unwrap())
+                .await
+                .unwrap();
+        }
+    });
+
+    let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+    let config = ClientConfig {
+        accept_versions: vec!["1.1".to_string()],
+        ..ClientConfig::default()
+    };
+    let (client, _handle) = StompClient::connect(stream, config).await.unwrap();
+
+    client
+        .ack_with_subscription_in_transaction("msg-1", "sub-1", "tx-1")
+        .await
+        .unwrap();
+    client
+        .nack_with_subscription_in_transaction("msg-2", "sub-1", "tx-1")
+        .await
+        .unwrap();
+
+    let ack = frame_rx.recv().await.unwrap();
+    assert_eq!(ack.command, "ACK");
+    assert_eq!(ack.get_header("message-id"), Some("msg-1"));
+    assert_eq!(ack.get_header("subscription"), Some("sub-1"));
+    assert_eq!(ack.get_header("transaction"), Some("tx-1"));
+    assert_eq!(ack.get_header("id"), None);
+
+    let nack = frame_rx.recv().await.unwrap();
+    assert_eq!(nack.command, "NACK");
+    assert_eq!(nack.get_header("message-id"), Some("msg-2"));
+    assert_eq!(nack.get_header("subscription"), Some("sub-1"));
+    assert_eq!(nack.get_header("transaction"), Some("tx-1"));
+    assert_eq!(nack.get_header("id"), None);
+}
