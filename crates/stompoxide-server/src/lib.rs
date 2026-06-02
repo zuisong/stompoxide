@@ -569,8 +569,12 @@ impl StompServer {
 
         framed_read.decoder_mut().version = negotiated_version;
         framed_write.encoder_mut().version = negotiated_version;
-
-        // Validate required host header for STOMP 1.1 / 1.2
+        // NOTE: According to the STOMP 1.1 / 1.2 specifications, the "host" header is REQUIRED
+        // in CONNECT/STOMP frames. However, popular client libraries (such as @stomp/stompjs)
+        // do not send it by default, and major message brokers (like RabbitMQ and ActiveMQ)
+        // are lenient and do not enforce it. To prevent compatibility issues for users, we
+        // intentionally skip this strict validation, keeping it commented out for reference.
+        /*
         match negotiated_version {
             StompVersion::V1_0 => (),
             StompVersion::V1_1 | StompVersion::V1_2 => {
@@ -580,6 +584,7 @@ impl StompServer {
                 }
             }
         }
+        */
 
         // Negotiate heartbeat.
         let mut client_cx = 0;
