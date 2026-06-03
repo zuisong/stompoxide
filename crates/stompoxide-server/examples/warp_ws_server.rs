@@ -4,16 +4,15 @@ use std::{
     task::{Context, Poll},
 };
 
-use axum::{
-    Router,
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    routing::get,
-};
-use bytes::{BufMut, Bytes, BytesMut};
+use bytes::{BufMut, BytesMut};
 use futures_util::{Sink, Stream};
-use stompoxide_server::StompServer;
+use stompoxide_server::{StompConnectionService, StompServer};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tower::ServiceExt;
+use warp::{
+    Filter,
+    ws::{Message, WebSocket},
+};
 
 struct WsStream {
     ws: WebSocket,
@@ -47,24 +46,13 @@ impl AsyncRead for WsStream {
 
             match Pin::new(&mut self.ws).poll_next(cx) {
                 Poll::Ready(Some(Ok(msg))) => {
-                    match msg {
-                        Message::Text(s) => {
-                            let bytes = Bytes::from(s);
-                            if !bytes.is_empty() {
-                                self.read_buf.put_slice(&bytes);
-                            }
+                    if msg.is_text() || msg.is_binary() {
+                        let bytes = msg.as_bytes();
+                        if !bytes.is_empty() {
+                            self.read_buf.put_slice(bytes);
                         }
-                        Message::Binary(b) => {
-                            let bytes = Bytes::from(b);
-                            if !bytes.is_empty() {
-                                self.read_buf.put_slice(&bytes);
-                            }
-                        }
-                        Message::Ping(_) | Message::Pong(_) => {
-                            // Ignore Ping/Pong and poll the underlying stream again.
-                            continue;
-                        }
-                        Message::Close(_) => return Poll::Ready(Ok(())), // EOF
+                    } else if msg.is_close() {
+                        return Poll::Ready(Ok(())); // EOF
                     }
                 }
                 Poll::Ready(Some(Err(e))) => {
@@ -100,9 +88,9 @@ impl AsyncWrite for WsStream {
                 Poll::Ready(Ok(())) => {
                     let data = self.write_buf.split().freeze();
                     let msg = if let Ok(s) = std::str::from_utf8(&data) {
-                        Message::Text(s.into())
+                        Message::text(s)
                     } else {
-                        Message::Binary(data.into())
+                        Message::binary(data)
                     };
                     if let Err(e) = Pin::new(&mut self.ws).start_send(msg) {
                         return Poll::Ready(Err(io::Error::new(io::ErrorKind::WriteZero, e)));
@@ -142,23 +130,40 @@ async fn main() {
     let server = StompServer::new();
     let service = server.connection_service();
 
-    let app = Router::new().route(
-        "/ws",
-        get(move |ws: WebSocketUpgrade| {
-            let service = service.clone();
-            async move {
-                ws.protocols(["v12.stomp", "v11.stomp", "v10.stomp"])
-                    .on_upgrade(move |socket| async move {
-                        let stream = WsStream::new(socket);
-                        let _ = service.oneshot(stream).await;
-                    })
-            }
-        }),
-    );
+    let routes = warp::path("ws")
+        .and(warp::ws())
+        .and(warp::header::optional::<String>("sec-websocket-protocol"))
+        .and(warp::any().map(move || service.clone()))
+        .map(
+            |ws: warp::ws::Ws, protocol: Option<String>, service: StompConnectionService| {
+                let reply = ws.on_upgrade(move |socket| async move {
+                    let stream = WsStream::new(socket);
+                    let _ = service.oneshot(stream).await;
+                });
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:3000")
-        .await
-        .unwrap();
-    println!("Starting Axum STOMP WebSocket Server on ws://127.0.0.1:3000/ws...");
-    axum::serve(listener, app).await.unwrap();
+                // Negotiate Sec-WebSocket-Protocol header, prioritizing higher versions
+                let client_protocols: Vec<&str> = protocol
+                    .as_deref()
+                    .unwrap_or("")
+                    .split(',')
+                    .map(|p| p.trim())
+                    .collect();
+
+                let selected_protocol = if client_protocols.contains(&"v12.stomp") {
+                    "v12.stomp"
+                } else if client_protocols.contains(&"v11.stomp") {
+                    "v11.stomp"
+                } else if client_protocols.contains(&"v10.stomp") {
+                    "v10.stomp"
+                } else {
+                    "v12.stomp"
+                };
+
+                warp::reply::with_header(reply, "sec-websocket-protocol", selected_protocol)
+            },
+        );
+
+    let addr = ([127, 0, 0, 1], 3000);
+    println!("Starting Warp STOMP WebSocket Server on ws://127.0.0.1:3000/ws...");
+    warp::serve(routes).run(addr).await;
 }

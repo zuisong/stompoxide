@@ -26,7 +26,7 @@ Run the included example:
 cargo run -p stompoxide-server --example tcp_server
 ```
 
-## WebSocket Example
+## WebSocket Examples
 
 Run the Axum WebSocket example:
 
@@ -34,7 +34,25 @@ Run the Axum WebSocket example:
 cargo run -p stompoxide-server --example axum_ws_server
 ```
 
-Then open the browser debugger:
+Run the Hyper WebSocket example:
+
+```sh
+cargo run -p stompoxide-server --example hyper_ws_server
+```
+
+Run the Actix WebSocket example:
+
+```sh
+cargo run -p stompoxide-server --example actix_ws_server
+```
+
+Run the Warp WebSocket example:
+
+```sh
+cargo run -p stompoxide-server --example warp_ws_server
+```
+
+Then open the browser client (by opening the file in your browser):
 
 ```text
 crates/stompoxide-server/examples/stomp_client.html
