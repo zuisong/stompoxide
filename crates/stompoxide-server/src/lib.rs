@@ -20,7 +20,31 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::Service;
 use uuid::Uuid;
 
+mod http;
+
+pub use http::StompWebSocketService;
+
 type WriteResult = Result<(), std::io::Error>;
+
+pub const STOMP_SUBPROTOCOLS: [&str; 3] = ["v12.stomp", "v11.stomp", "v10.stomp"];
+
+pub fn select_stomp_subprotocol(header_value: Option<&str>) -> &'static str {
+    let client_protocols: Vec<&str> = header_value
+        .unwrap_or_default()
+        .split(',')
+        .map(str::trim)
+        .collect();
+
+    if client_protocols.contains(&STOMP_SUBPROTOCOLS[0]) {
+        STOMP_SUBPROTOCOLS[0]
+    } else if client_protocols.contains(&STOMP_SUBPROTOCOLS[1]) {
+        STOMP_SUBPROTOCOLS[1]
+    } else if client_protocols.contains(&STOMP_SUBPROTOCOLS[2]) {
+        STOMP_SUBPROTOCOLS[2]
+    } else {
+        STOMP_SUBPROTOCOLS[0]
+    }
+}
 
 enum WriteCommand {
     Frame(StompFrame<'static>, Option<oneshot::Sender<WriteResult>>),
@@ -456,6 +480,10 @@ impl StompServer {
 
     pub fn connection_service(&self) -> StompConnectionService {
         StompConnectionService::new(self.clone())
+    }
+
+    pub fn websocket_service(&self) -> StompWebSocketService {
+        StompWebSocketService::new(self.connection_service())
     }
 
     pub async fn listen_tcp(&self, addr: &str) -> Result<(), std::io::Error> {

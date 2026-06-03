@@ -79,6 +79,16 @@ service.oneshot(stream).await?;
 This keeps STOMP protocol handling independent from Axum, Hyper, or any other
 specific web framework.
 
+For WebSocket-based integrations, `stompoxide-server` also exposes:
+
+- `StompServer::websocket_service()`: a Tower `Service<Request<_>>` that
+  handles WebSocket upgrade and hands the connection to STOMP
+- `STOMP_SUBPROTOCOLS` and `select_stomp_subprotocol(...)` for subprotocol
+  negotiation
+
+The implementation stands on existing WebSocket crates instead of maintaining a
+custom WebSocket byte-stream adapter in this crate.
+
 ## Behavior
 
 - Accepts `CONNECT` and `STOMP` as initial connection commands.

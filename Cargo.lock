@@ -1684,7 +1684,6 @@ dependencies = [
  "stompoxide-client",
  "stompoxide-codec",
  "tokio",
- "tokio-tungstenite",
  "tokio-util",
  "tower",
  "tracing-subscriber",
