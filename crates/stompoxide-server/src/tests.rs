@@ -396,6 +396,14 @@ async fn test_stompoxide_server_rejects_queue_wildcard_subscription() {
     assert!(framed.next().await.is_none());
 }
 
+#[test]
+fn test_stompoxide_server_double_star_matches_only_with_remaining_segments() {
+    assert!(matches_destination("/topic/**/foo", "/topic/a/b/foo"));
+    assert!(matches_destination("/topic/**/foo", "/topic/foo"));
+    assert!(!matches_destination("/topic/**/foo", "/topic/a/b/bar"));
+    assert!(!matches_destination("/topic/**/foo", "/queue/bar"));
+}
+
 #[tokio::test]
 async fn test_stompoxide_server_version_negotiation_failure() {
     let server = StompServer::new();

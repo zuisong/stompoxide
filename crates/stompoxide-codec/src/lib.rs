@@ -12,6 +12,8 @@ use winnow::{
 #[cfg(test)]
 mod tests;
 
+pub const DEFAULT_MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, Clone)]
 pub struct StompFrame<'a> {
     pub command: Cow<'a, str>,
@@ -118,21 +120,30 @@ fn map_empty_slice(s: &[u8]) -> Option<&[u8]> {
 }
 
 pub fn parse_frame(input: &'_ [u8]) -> ModalResult<(&'_ [u8], StompFrame<'_>), ContextError> {
-    parse_frame_with_version(input, StompVersion::V1_2)
+    parse_frame_with_version_and_max_body_size(input, StompVersion::V1_2, DEFAULT_MAX_BODY_SIZE)
 }
 
 pub fn parse_frame_with_version(
     input: &'_ [u8],
     version: StompVersion,
 ) -> ModalResult<(&'_ [u8], StompFrame<'_>), ContextError> {
+    parse_frame_with_version_and_max_body_size(input, version, DEFAULT_MAX_BODY_SIZE)
+}
+
+pub fn parse_frame_with_version_and_max_body_size(
+    input: &'_ [u8],
+    version: StompVersion,
+    max_body_size: usize,
+) -> ModalResult<(&'_ [u8], StompFrame<'_>), ContextError> {
     let mut partial = Partial::new(input);
-    let result = { parse_frame_stream(&mut partial, version)? };
+    let result = { parse_frame_stream(&mut partial, version, max_body_size)? };
     Ok((partial.into_inner(), result))
 }
 
 pub fn parse_frame_stream<'b>(
     input: &mut Partial<&'b [u8]>,
     version: StompVersion,
+    max_body_size: usize,
 ) -> PResult<StompFrame<'b>> {
     let command_raw: &[u8] =
         delimited(repeat(0.., line_ending).map(|()| ()), alpha1, line_ending).parse_next(input)?;
@@ -150,7 +161,12 @@ pub fn parse_frame_stream<'b>(
         None => take_until(0.., "\x00")
             .map(map_empty_slice)
             .parse_next(input)?,
-        Some(length) => take(length).map(Some).parse_next(input)?,
+        Some(length) => {
+            if length > max_body_size {
+                return Err(winnow::error::ErrMode::Cut(ContextError::new()));
+            }
+            take(length).map(Some).parse_next(input)?
+        }
     };
 
     (literal("\0"), opt(line_ending.complete_err())).parse_next(input)?;
@@ -231,12 +247,23 @@ fn get_content_length_header(body: &[u8]) -> Vec<u8> {
 
 pub struct StompCodec {
     pub version: StompVersion,
+    pub max_body_size: usize,
 }
 
 impl Default for StompCodec {
     fn default() -> Self {
         Self {
             version: StompVersion::V1_2,
+            max_body_size: DEFAULT_MAX_BODY_SIZE,
+        }
+    }
+}
+
+impl StompCodec {
+    pub fn with_max_body_size(max_body_size: usize) -> Self {
+        Self {
+            version: StompVersion::V1_2,
+            max_body_size,
         }
     }
 }
@@ -266,7 +293,11 @@ impl Decoder for StompCodec {
 
         let (consumed, frame_owned) = {
             let input = src.as_ref();
-            match parse_frame_with_version(input, self.version) {
+            match parse_frame_with_version_and_max_body_size(
+                input,
+                self.version,
+                self.max_body_size,
+            ) {
                 Ok((remain, frame)) => {
                     let consumed = input.len() - remain.len();
                     (consumed, frame.into_owned())

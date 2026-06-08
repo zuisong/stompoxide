@@ -14,7 +14,7 @@ use stompoxide_codec::{StompCodec, StompFrame, StompVersion};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     net::TcpListener,
-    sync::{RwLock, mpsc, oneshot},
+    sync::{RwLock, Semaphore, mpsc, oneshot},
 };
 use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::Service;
@@ -397,21 +397,29 @@ fn contains_wildcard(destination: &str) -> bool {
 fn matches_destination(pattern: &str, destination: &str) -> bool {
     let pat_segs: Vec<&str> = pattern.split('/').collect();
     let dest_segs: Vec<&str> = destination.split('/').collect();
-    for (i, &pat) in pat_segs.iter().enumerate() {
-        if pat == "**" {
-            return true;
+    matches_destination_segments(&pat_segs, &dest_segs)
+}
+
+fn matches_destination_segments(pattern: &[&str], destination: &[&str]) -> bool {
+    if pattern.is_empty() {
+        return destination.is_empty();
+    }
+
+    match pattern[0] {
+        "**" => {
+            matches_destination_segments(&pattern[1..], destination)
+                || (!destination.is_empty()
+                    && matches_destination_segments(pattern, &destination[1..]))
         }
-        if pat == "*" {
-            if i >= dest_segs.len() {
-                return false;
-            }
-            continue;
+        "*" => {
+            !destination.is_empty()
+                && matches_destination_segments(&pattern[1..], &destination[1..])
         }
-        if i >= dest_segs.len() || dest_segs[i] != pat {
-            return false;
+        segment => {
+            destination.first() == Some(&segment)
+                && matches_destination_segments(&pattern[1..], &destination[1..])
         }
     }
-    pat_segs.len() == dest_segs.len()
 }
 
 fn ack_id_and_subscription<'a>(
@@ -455,10 +463,32 @@ fn ack_id_and_subscription<'a>(
 
 pub type StompAuthenticator = Arc<dyn Fn(&str, &str) -> bool + Send + Sync>;
 
+pub const DEFAULT_MAX_CONNECTIONS: usize = 1024;
+
+#[derive(Clone)]
+struct ServerConfig {
+    limiter: Arc<Semaphore>,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self::with_max_connections(DEFAULT_MAX_CONNECTIONS)
+    }
+}
+
+impl ServerConfig {
+    fn with_max_connections(max_connections: usize) -> Self {
+        Self {
+            limiter: Arc::new(Semaphore::new(max_connections)),
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct StompServer {
     router: PubSubRouter,
     authenticator: Option<StompAuthenticator>,
+    config: ServerConfig,
 }
 
 impl StompServer {
@@ -471,6 +501,11 @@ impl StompServer {
         F: Fn(&str, &str) -> bool + Send + Sync + 'static,
     {
         self.authenticator = Some(Arc::new(authenticator));
+        self
+    }
+
+    pub fn with_max_connections(mut self, max_connections: usize) -> Self {
+        self.config = ServerConfig::with_max_connections(max_connections);
         self
     }
 
@@ -490,14 +525,20 @@ impl StompServer {
         let listener = TcpListener::bind(addr).await?;
         log::info!("STOMP Server listening on TCP {}", addr);
         loop {
+            let permit = self.config.limiter.clone().acquire_owned().await;
+            let Ok(permit) = permit else {
+                return Ok(());
+            };
             match listener.accept().await {
                 Ok((socket, _)) => {
                     let server = self.clone();
                     tokio::spawn(async move {
+                        let _permit = permit;
                         server.handle_connection(socket).await;
                     });
                 }
                 Err(e) => {
+                    drop(permit);
                     log::error!("TCP accept error: {:?}", e);
                 }
             }

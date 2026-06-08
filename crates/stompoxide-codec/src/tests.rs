@@ -190,6 +190,18 @@ fn parse_a_incomplete_message() {
 }
 
 #[test]
+fn parse_rejects_content_length_over_max_body_size() {
+    let err = parse_frame_with_version_and_max_body_size(
+        b"MESSAGE\ncontent-length:6\n\nhello!\0".as_ref(),
+        StompVersion::V1_2,
+        5,
+    )
+    .unwrap_err();
+
+    assert_matches!(err, winnow::error::ErrMode::Cut(_));
+}
+
+#[test]
 fn parse_and_serialize_message_header_value_with_colon() {
     let data = b"CONNECTED
 server:ActiveMQ/6.0.0

@@ -201,6 +201,9 @@ enum ClientCmd {
         transaction_id: String,
         resp: oneshot::Sender<Result<(), StompError>>,
     },
+    Disconnect {
+        resp: oneshot::Sender<Result<(), StompError>>,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -535,6 +538,10 @@ impl StompClient {
     pub async fn abort(&self, transaction_id: impl Into<String>) -> Result<(), StompError> {
         self.sender().abort(transaction_id).await
     }
+
+    pub async fn disconnect(&self) -> Result<(), StompError> {
+        self.sender().disconnect().await
+    }
 }
 
 impl StompSender {
@@ -687,6 +694,16 @@ impl StompSender {
 
         resp_rx.await.map_err(|_| StompError::Disconnected)?
     }
+
+    pub async fn disconnect(&self) -> Result<(), StompError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(ClientCmd::Disconnect { resp: resp_tx })
+            .await
+            .map_err(|_| StompError::Disconnected)?;
+
+        resp_rx.await.map_err(|_| StompError::Disconnected)?
+    }
 }
 
 impl StompSubscriber {
@@ -717,6 +734,7 @@ impl StompSubscriber {
             id: sub_id,
             cmd_tx: self.cmd_tx.clone(),
             stream: tokio_stream::wrappers::UnboundedReceiverStream::new(msg_rx),
+            auto_unsubscribe: true,
         })
     }
 }
@@ -725,6 +743,23 @@ pub struct Subscription {
     id: String,
     cmd_tx: mpsc::Sender<ClientCmd>,
     stream: tokio_stream::wrappers::UnboundedReceiverStream<StompFrame<'static>>,
+    auto_unsubscribe: bool,
+}
+
+impl Subscription {
+    pub async fn unsubscribe(mut self) -> Result<(), StompError> {
+        self.auto_unsubscribe = false;
+        let (resp_tx, resp_rx) = oneshot::channel();
+        self.cmd_tx
+            .send(ClientCmd::Unsubscribe {
+                id: self.id.clone(),
+                resp: resp_tx,
+            })
+            .await
+            .map_err(|_| StompError::Disconnected)?;
+
+        resp_rx.await.map_err(|_| StompError::Disconnected)?
+    }
 }
 
 impl Stream for Subscription {
@@ -737,6 +772,9 @@ impl Stream for Subscription {
 
 impl Drop for Subscription {
     fn drop(&mut self) {
+        if !self.auto_unsubscribe {
+            return;
+        }
         let cmd_tx = self.cmd_tx.clone();
         let id = self.id.clone();
         tokio::spawn(async move {
@@ -903,6 +941,19 @@ where
                             };
                             let res = writer.send(frame).await.map_err(StompError::Io);
                             let _ = resp.send(res);
+                        }
+                        ClientCmd::Disconnect { resp } => {
+                            let frame = StompFrame {
+                                command: Cow::Borrowed("DISCONNECT"),
+                                headers: vec![],
+                                body: None,
+                            };
+                            let res = writer.send(frame).await.map_err(StompError::Io);
+                            let should_close = res.is_ok();
+                            let _ = resp.send(res);
+                            if should_close {
+                                return Ok(());
+                            }
                         }
                     }
                 } else {

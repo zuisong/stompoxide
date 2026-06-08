@@ -371,3 +371,84 @@ async fn test_client_stomp_1_1_ack_nack_with_subscription_in_transaction() {
     assert_eq!(nack.get_header("transaction"), Some("tx-1"));
     assert_eq!(nack.get_header("id"), None);
 }
+
+#[tokio::test]
+async fn test_client_transaction_unsubscribe_and_disconnect_frames() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let local_addr = listener.local_addr().unwrap();
+
+    let (frame_tx, mut frame_rx) = mpsc::channel(10);
+
+    tokio::spawn(async move {
+        if let Ok((socket, _)) = listener.accept().await {
+            let mut framed = Framed::new(socket, StompCodec::default());
+            let connect = framed.next().await.unwrap().unwrap();
+            assert_eq!(connect.command, "CONNECT");
+
+            framed
+                .send(StompFrame {
+                    command: "CONNECTED".into(),
+                    headers: vec![("version".to_string(), "1.2".to_string())],
+                    body: None,
+                })
+                .await
+                .unwrap();
+
+            for _ in 0..7 {
+                frame_tx
+                    .send(framed.next().await.unwrap().unwrap())
+                    .await
+                    .unwrap();
+            }
+        }
+    });
+
+    let stream = tokio::net::TcpStream::connect(local_addr).await.unwrap();
+    let (client, handle) = StompClient::connect(stream, ClientConfig::default())
+        .await
+        .unwrap();
+
+    client.begin("tx-1").await.unwrap();
+    client
+        .send(SendRequest::new("/queue/jobs", "payload").transaction("tx-1"))
+        .await
+        .unwrap();
+    client.commit("tx-1").await.unwrap();
+    client.abort("tx-2").await.unwrap();
+
+    let subscription = client
+        .subscribe(SubscribeRequest::new("/topic/events").id("sub-1"))
+        .await
+        .unwrap();
+    subscription.unsubscribe().await.unwrap();
+    client.disconnect().await.unwrap();
+
+    let begin = frame_rx.recv().await.unwrap();
+    assert_eq!(begin.command, "BEGIN");
+    assert_eq!(begin.get_header("transaction"), Some("tx-1"));
+
+    let send = frame_rx.recv().await.unwrap();
+    assert_eq!(send.command, "SEND");
+    assert_eq!(send.get_header("transaction"), Some("tx-1"));
+
+    let commit = frame_rx.recv().await.unwrap();
+    assert_eq!(commit.command, "COMMIT");
+    assert_eq!(commit.get_header("transaction"), Some("tx-1"));
+
+    let abort = frame_rx.recv().await.unwrap();
+    assert_eq!(abort.command, "ABORT");
+    assert_eq!(abort.get_header("transaction"), Some("tx-2"));
+
+    let subscribe = frame_rx.recv().await.unwrap();
+    assert_eq!(subscribe.command, "SUBSCRIBE");
+    assert_eq!(subscribe.get_header("id"), Some("sub-1"));
+
+    let unsubscribe = frame_rx.recv().await.unwrap();
+    assert_eq!(unsubscribe.command, "UNSUBSCRIBE");
+    assert_eq!(unsubscribe.get_header("id"), Some("sub-1"));
+
+    let disconnect = frame_rx.recv().await.unwrap();
+    assert_eq!(disconnect.command, "DISCONNECT");
+
+    assert!(handle.await.unwrap().is_ok());
+}
