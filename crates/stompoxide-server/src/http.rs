@@ -1,18 +1,14 @@
 use std::{
     convert::Infallible,
     future::Future,
-    io,
     pin::Pin,
     task::{Context, Poll},
 };
 
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
 use http_body_util::Full;
 use hyper::{Request, Response, StatusCode, body::Body};
 use hyper_tungstenite::{is_upgrade_request, tungstenite::Message, upgrade};
-use tokio::io::join;
-use tokio_util::io::{CopyToBytes, SinkWriter, StreamReader};
 use tower::Service;
 
 use crate::{StompConnectionService, select_stomp_subprotocol};
@@ -89,36 +85,23 @@ fn websocket_io(
         hyper_util::rt::TokioIo<hyper::upgrade::Upgraded>,
     >,
 ) -> impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static {
-    let (write_half, read_half) = websocket.split();
-
-    let reader = StreamReader::new(read_half.filter_map(|message| async move {
-        match message {
-            Ok(Message::Text(text)) => Some(Ok(Bytes::copy_from_slice(text.as_str().as_bytes()))),
-            Ok(Message::Binary(bytes)) if !bytes.is_empty() => Some(Ok(bytes)),
-            Ok(Message::Binary(_))
-            | Ok(Message::Ping(_))
-            | Ok(Message::Pong(_))
-            | Ok(Message::Close(_))
-            | Ok(Message::Frame(_)) => None,
-            Err(error) => Some(Err(io::Error::new(io::ErrorKind::ConnectionReset, error))),
-        }
-    }));
-
-    let writer = SinkWriter::new(CopyToBytes::new(
-        write_half
-            .sink_map_err(|error| io::Error::new(io::ErrorKind::ConnectionReset, error))
-            .with(
-                |bytes: Bytes| async move { Ok::<Message, io::Error>(message_from_bytes(bytes)) },
-            ),
-    ));
-
-    join(reader, writer)
-}
-
-fn message_from_bytes(bytes: Bytes) -> Message {
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        Message::Text(text.to_owned().into())
-    } else {
-        Message::Binary(bytes)
-    }
+    crate::ws::websocket_io(
+        websocket,
+        |message| match message {
+            Message::Text(text) => Some(Bytes::copy_from_slice(text.as_str().as_bytes())),
+            Message::Binary(bytes) if !bytes.is_empty() => Some(bytes),
+            Message::Binary(_)
+            | Message::Ping(_)
+            | Message::Pong(_)
+            | Message::Close(_)
+            | Message::Frame(_) => None,
+        },
+        |bytes| {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                Message::Text(text.to_owned().into())
+            } else {
+                Message::Binary(bytes)
+            }
+        },
+    )
 }

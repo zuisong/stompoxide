@@ -1,8 +1,5 @@
 use bytes::Bytes;
-use futures_util::{SinkExt, StreamExt};
 use stompoxide_server::{StompConnectionService, StompServer, select_stomp_subprotocol};
-use tokio::io::join;
-use tokio_util::io::{CopyToBytes, SinkWriter, StreamReader};
 use tower::ServiceExt;
 use warp::{
     Filter,
@@ -41,42 +38,22 @@ async fn main() {
 fn websocket_io(
     websocket: WebSocket,
 ) -> impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static {
-    let (write_half, read_half) = websocket.split();
-
-    let reader = StreamReader::new(read_half.filter_map(|message| async move {
-        match message {
-            Ok(message) if message.is_text() || message.is_binary() => {
+    stompoxide_server::ws::websocket_io(
+        websocket,
+        |message| {
+            if message.is_text() || message.is_binary() {
                 let bytes = Bytes::copy_from_slice(message.as_bytes());
-                if bytes.is_empty() {
-                    None
-                } else {
-                    Some(Ok(bytes))
-                }
+                if bytes.is_empty() { None } else { Some(bytes) }
+            } else {
+                None
             }
-            Ok(message) if message.is_ping() || message.is_pong() || message.is_close() => None,
-            Ok(_) => None,
-            Err(error) => Some(Err(std::io::Error::new(
-                std::io::ErrorKind::ConnectionReset,
-                error,
-            ))),
-        }
-    }));
-
-    let writer = SinkWriter::new(CopyToBytes::new(
-        write_half
-            .sink_map_err(|error| std::io::Error::new(std::io::ErrorKind::ConnectionReset, error))
-            .with(|bytes: Bytes| async move {
-                Ok::<Message, std::io::Error>(message_from_bytes(bytes))
-            }),
-    ));
-
-    join(reader, writer)
-}
-
-fn message_from_bytes(bytes: Bytes) -> Message {
-    if let Ok(text) = std::str::from_utf8(&bytes) {
-        Message::text(text)
-    } else {
-        Message::binary(bytes)
-    }
+        },
+        |bytes| {
+            if let Ok(text) = std::str::from_utf8(&bytes) {
+                Message::text(text)
+            } else {
+                Message::binary(bytes)
+            }
+        },
+    )
 }

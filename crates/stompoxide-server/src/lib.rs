@@ -22,6 +22,9 @@ use uuid::Uuid;
 
 #[cfg(feature = "websocket")]
 mod http;
+#[cfg(feature = "websocket")]
+#[doc(hidden)]
+pub mod ws;
 
 #[cfg(feature = "websocket")]
 pub use http::StompWebSocketService;
