@@ -206,15 +206,20 @@ enum ClientCmd {
     },
 }
 
+enum AckCommand {
+    Ack,
+    Nack,
+}
+
 #[derive(Clone, Debug)]
-struct AckRequest {
+pub struct AckRequest {
     id: String,
     subscription: Option<String>,
     transaction: Option<String>,
 }
 
 impl AckRequest {
-    fn new(id: impl Into<String>) -> Self {
+    pub fn new(id: impl Into<String>) -> Self {
         Self {
             id: id.into(),
             subscription: None,
@@ -222,12 +227,12 @@ impl AckRequest {
         }
     }
 
-    fn subscription(mut self, subscription: impl Into<String>) -> Self {
+    pub fn subscription(mut self, subscription: impl Into<String>) -> Self {
         self.subscription = Some(subscription.into());
         self
     }
 
-    fn transaction(mut self, transaction: impl Into<String>) -> Self {
+    pub fn transaction(mut self, transaction: impl Into<String>) -> Self {
         self.transaction = Some(transaction.into());
         self
     }
@@ -465,66 +470,12 @@ impl StompClient {
         self.subscriber().subscribe(request).await
     }
 
-    pub async fn ack(&self, id: impl Into<String>) -> Result<(), StompError> {
-        self.sender().ack(id).await
+    pub async fn ack(&self, request: AckRequest) -> Result<(), StompError> {
+        self.sender().ack(request).await
     }
 
-    pub async fn ack_with_subscription(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.sender().ack_with_subscription(id, subscription).await
-    }
-
-    pub async fn ack_in_transaction(
-        &self,
-        id: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.sender().ack_in_transaction(id, transaction_id).await
-    }
-
-    pub async fn ack_with_subscription_in_transaction(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.sender()
-            .ack_with_subscription_in_transaction(id, subscription, transaction_id)
-            .await
-    }
-
-    pub async fn nack(&self, id: impl Into<String>) -> Result<(), StompError> {
-        self.sender().nack(id).await
-    }
-
-    pub async fn nack_with_subscription(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.sender().nack_with_subscription(id, subscription).await
-    }
-
-    pub async fn nack_in_transaction(
-        &self,
-        id: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.sender().nack_in_transaction(id, transaction_id).await
-    }
-
-    pub async fn nack_with_subscription_in_transaction(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.sender()
-            .nack_with_subscription_in_transaction(id, subscription, transaction_id)
-            .await
+    pub async fn nack(&self, request: AckRequest) -> Result<(), StompError> {
+        self.sender().nack(request).await
     }
 
     pub async fn begin(&self, transaction_id: impl Into<String>) -> Result<(), StompError> {
@@ -558,98 +509,28 @@ impl StompSender {
         resp_rx.await.map_err(|_| StompError::Disconnected)?
     }
 
-    pub async fn ack(&self, id: impl Into<String>) -> Result<(), StompError> {
-        self.ack_internal(AckRequest::new(id)).await
+    pub async fn ack(&self, request: AckRequest) -> Result<(), StompError> {
+        self.send_ack(AckCommand::Ack, request).await
     }
 
-    pub async fn ack_with_subscription(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.ack_internal(AckRequest::new(id).subscription(subscription))
-            .await
+    pub async fn nack(&self, request: AckRequest) -> Result<(), StompError> {
+        self.send_ack(AckCommand::Nack, request).await
     }
 
-    pub async fn ack_in_transaction(
-        &self,
-        id: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.ack_internal(AckRequest::new(id).transaction(transaction_id))
-            .await
-    }
-
-    pub async fn ack_with_subscription_in_transaction(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.ack_internal(
-            AckRequest::new(id)
-                .subscription(subscription)
-                .transaction(transaction_id),
-        )
-        .await
-    }
-
-    async fn ack_internal(&self, request: AckRequest) -> Result<(), StompError> {
+    async fn send_ack(&self, command: AckCommand, request: AckRequest) -> Result<(), StompError> {
         let (resp_tx, resp_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(ClientCmd::Ack {
+        let cmd = match command {
+            AckCommand::Ack => ClientCmd::Ack {
                 request,
                 resp: resp_tx,
-            })
-            .await
-            .map_err(|_| StompError::Disconnected)?;
-
-        resp_rx.await.map_err(|_| StompError::Disconnected)?
-    }
-
-    pub async fn nack(&self, id: impl Into<String>) -> Result<(), StompError> {
-        self.nack_internal(AckRequest::new(id)).await
-    }
-
-    pub async fn nack_with_subscription(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.nack_internal(AckRequest::new(id).subscription(subscription))
-            .await
-    }
-
-    pub async fn nack_in_transaction(
-        &self,
-        id: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.nack_internal(AckRequest::new(id).transaction(transaction_id))
-            .await
-    }
-
-    pub async fn nack_with_subscription_in_transaction(
-        &self,
-        id: impl Into<String>,
-        subscription: impl Into<String>,
-        transaction_id: impl Into<String>,
-    ) -> Result<(), StompError> {
-        self.nack_internal(
-            AckRequest::new(id)
-                .subscription(subscription)
-                .transaction(transaction_id),
-        )
-        .await
-    }
-
-    async fn nack_internal(&self, request: AckRequest) -> Result<(), StompError> {
-        let (resp_tx, resp_rx) = oneshot::channel();
-        self.cmd_tx
-            .send(ClientCmd::Nack {
+            },
+            AckCommand::Nack => ClientCmd::Nack {
                 request,
                 resp: resp_tx,
-            })
+            },
+        };
+        self.cmd_tx
+            .send(cmd)
             .await
             .map_err(|_| StompError::Disconnected)?;
 

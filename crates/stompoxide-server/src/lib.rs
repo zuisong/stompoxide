@@ -20,8 +20,10 @@ use tokio_util::codec::{FramedRead, FramedWrite};
 use tower::Service;
 use uuid::Uuid;
 
+#[cfg(feature = "websocket")]
 mod http;
 
+#[cfg(feature = "websocket")]
 pub use http::StompWebSocketService;
 
 type WriteResult = Result<(), std::io::Error>;
@@ -517,6 +519,7 @@ impl StompServer {
         StompConnectionService::new(self.clone())
     }
 
+    #[cfg(feature = "websocket")]
     pub fn websocket_service(&self) -> StompWebSocketService {
         StompWebSocketService::new(self.connection_service())
     }

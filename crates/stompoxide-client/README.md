@@ -12,7 +12,9 @@ by the server to encode headers, heartbeats, and ACK/NACK frames.
 
 ```rust
 use futures_util::StreamExt;
-use stompoxide_client::{AckMode, ClientConfig, SendRequest, StompClient, SubscribeRequest};
+use stompoxide_client::{
+    AckMode, AckRequest, ClientConfig, SendRequest, StompClient, SubscribeRequest,
+};
 use tokio::net::TcpStream;
 
 #[tokio::main]
@@ -46,7 +48,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if let Some(frame) = subscription.next().await {
         println!("received frame: {:?}", frame.command);
         if let Some(ack_id) = frame.get_header("ack") {
-            sender.ack(ack_id).await?;
+            sender.ack(AckRequest::new(ack_id)).await?;
         }
     }
 
@@ -77,13 +79,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   - STOMP 1.1 `ACK` and `NACK` use `message-id` plus `subscription`.
   - STOMP 1.2 `ACK` and `NACK` use `id`, matching the `MESSAGE` frame's `ack`
     header.
-- Provides `ack_with_subscription(...)` and `nack_with_subscription(...)` for
-  STOMP 1.1, plus transaction-aware variants:
-  `ack_in_transaction(...)`, `nack_in_transaction(...)`,
-  `ack_with_subscription_in_transaction(...)`, and
-  `nack_with_subscription_in_transaction(...)`.
+- Sends `ACK` and `NACK` with `AckRequest`, which carries the required id plus
+  optional `subscription` and `transaction` headers.
 - Sends `BEGIN`, `COMMIT`, and `ABORT` transaction frames.
-- Sends `UNSUBSCRIBE` when a subscription is dropped.
+- Supports explicit `Subscription::unsubscribe().await`; dropping a
+  subscription still attempts a best-effort `UNSUBSCRIBE`.
 
 `send(...).await` confirms that the frame was written to the connection task.
 It does not currently wait for a broker `RECEIPT` frame, even when the request

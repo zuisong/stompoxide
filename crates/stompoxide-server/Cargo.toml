@@ -5,6 +5,10 @@ edition = "2024"
 rust-version = "1.86"
 license = "MIT"
 
+[features]
+default = ["websocket"]
+websocket = ["dep:bytes", "dep:http-body-util", "dep:hyper", "dep:hyper-tungstenite", "dep:hyper-util"]
+
 [dependencies]
 stompoxide-codec = { path = "../stompoxide-codec" }
 tokio = { version = "1", features = ["net", "time", "sync", "rt", "macros", "rt-multi-thread", "io-util"] }
@@ -13,11 +17,11 @@ futures-util = { version = "0.3", default-features = false, features = ["sink"] 
 log = "0.4"
 tower = { version = "0.5", default-features = false, features = ["util"] }
 uuid = { version = "1", features = ["v4"] }
-bytes = "1"
-hyper = { version = "1", features = ["full"] }
-hyper-util = { version = "0.1", features = ["full"] }
-hyper-tungstenite = "0.20"
-http-body-util = "0.1"
+bytes = { version = "1", optional = true }
+hyper = { version = "1", features = ["full"], optional = true }
+hyper-util = { version = "0.1", features = ["full"], optional = true }
+hyper-tungstenite = { version = "0.20", optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
 stompoxide-client = { path = "../stompoxide-client" }

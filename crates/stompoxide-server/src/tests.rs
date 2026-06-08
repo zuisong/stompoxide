@@ -1,5 +1,7 @@
 use futures_util::{SinkExt, StreamExt};
-use stompoxide_client::{AckMode, ClientConfig, SendRequest, StompClient, SubscribeRequest};
+use stompoxide_client::{
+    AckMode, AckRequest, ClientConfig, SendRequest, StompClient, SubscribeRequest,
+};
 use tokio::net::TcpStream;
 use tokio_util::codec::Framed;
 use tower::ServiceExt;
@@ -907,7 +909,7 @@ async fn test_stompoxide_ack_nack_redelivery() {
     let ack_id = msg1.get_header("ack").unwrap().to_string();
 
     // Client 1 sends NACK -> message should be redelivered
-    sender1.nack(ack_id).await.unwrap();
+    sender1.nack(AckRequest::new(ack_id)).await.unwrap();
 
     // Client 1 receives the redelivered message again
     let msg2 = tokio::time::timeout(Duration::from_millis(500), sub1.next())
@@ -1113,7 +1115,7 @@ async fn test_client_stomp_1_1_enforces_subscription_regression() {
     let (client, _handle) = StompClient::connect(stream, config).await.unwrap();
 
     // Call raw ack (missing subscription) -> should fail locally
-    let res = client.ack("some-msg-id").await;
+    let res = client.ack(AckRequest::new("some-msg-id")).await;
     assert!(res.is_err());
     if let Err(StompError::Protocol(msg)) = res {
         assert!(msg.contains("STOMP 1.1 ACK requires a subscription header"));
@@ -1122,7 +1124,7 @@ async fn test_client_stomp_1_1_enforces_subscription_regression() {
     }
 
     // Call raw nack (missing subscription) -> should fail locally
-    let res_nack = client.nack("some-msg-id").await;
+    let res_nack = client.nack(AckRequest::new("some-msg-id")).await;
     assert!(res_nack.is_err());
     if let Err(StompError::Protocol(msg)) = res_nack {
         assert!(msg.contains("STOMP 1.1 NACK requires a subscription header"));

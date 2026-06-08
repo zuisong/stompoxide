@@ -292,10 +292,10 @@ async fn test_client_send_ack_nack() {
         .unwrap();
 
     // Send ACK
-    client.ack("msg-1").await.unwrap();
+    client.ack(AckRequest::new("msg-1")).await.unwrap();
 
     // Send NACK
-    client.nack("msg-2").await.unwrap();
+    client.nack(AckRequest::new("msg-2")).await.unwrap();
 
     // Verify ACK frame received by the mock server
     let ack_received = frame_rx.recv().await.unwrap();
@@ -349,11 +349,19 @@ async fn test_client_stomp_1_1_ack_nack_with_subscription_in_transaction() {
     let (client, _handle) = StompClient::connect(stream, config).await.unwrap();
 
     client
-        .ack_with_subscription_in_transaction("msg-1", "sub-1", "tx-1")
+        .ack(
+            AckRequest::new("msg-1")
+                .subscription("sub-1")
+                .transaction("tx-1"),
+        )
         .await
         .unwrap();
     client
-        .nack_with_subscription_in_transaction("msg-2", "sub-1", "tx-1")
+        .nack(
+            AckRequest::new("msg-2")
+                .subscription("sub-1")
+                .transaction("tx-1"),
+        )
         .await
         .unwrap();
 
