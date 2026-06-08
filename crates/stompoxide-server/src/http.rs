@@ -55,10 +55,12 @@ where
 
             match upgrade(&mut req, None) {
                 Ok((mut response, websocket)) => {
-                    response.headers_mut().insert(
-                        "Sec-WebSocket-Protocol",
-                        selected_protocol.parse().expect("valid subprotocol header"),
-                    );
+                    if let Some(protocol) = selected_protocol {
+                        response.headers_mut().insert(
+                            "Sec-WebSocket-Protocol",
+                            protocol.parse().expect("valid subprotocol header"),
+                        );
+                    }
 
                     tokio::spawn(async move {
                         if let Ok(ws) = websocket.await {

@@ -33,7 +33,7 @@ type WriteResult = Result<(), std::io::Error>;
 
 pub const STOMP_SUBPROTOCOLS: [&str; 3] = ["v12.stomp", "v11.stomp", "v10.stomp"];
 
-pub fn select_stomp_subprotocol(header_value: Option<&str>) -> &'static str {
+pub fn select_stomp_subprotocol(header_value: Option<&str>) -> Option<&'static str> {
     let client_protocols: Vec<&str> = header_value
         .unwrap_or_default()
         .split(',')
@@ -41,13 +41,13 @@ pub fn select_stomp_subprotocol(header_value: Option<&str>) -> &'static str {
         .collect();
 
     if client_protocols.contains(&STOMP_SUBPROTOCOLS[0]) {
-        STOMP_SUBPROTOCOLS[0]
+        Some(STOMP_SUBPROTOCOLS[0])
     } else if client_protocols.contains(&STOMP_SUBPROTOCOLS[1]) {
-        STOMP_SUBPROTOCOLS[1]
+        Some(STOMP_SUBPROTOCOLS[1])
     } else if client_protocols.contains(&STOMP_SUBPROTOCOLS[2]) {
-        STOMP_SUBPROTOCOLS[2]
+        Some(STOMP_SUBPROTOCOLS[2])
     } else {
-        STOMP_SUBPROTOCOLS[0]
+        None
     }
 }
 
@@ -56,10 +56,16 @@ enum WriteCommand {
     Heartbeat,
 }
 
+#[derive(Debug, Clone)]
+pub enum ServerFrame {
+    Owned(StompFrame<'static>),
+    Borrowed(Arc<StompFrame<'static>>, Option<String>, Option<String>),
+}
+
 pub struct SubscriptionInfo {
     pub conn_id: Uuid,
     pub sub_id: String,
-    pub sender: mpsc::UnboundedSender<StompFrame<'static>>,
+    pub sender: mpsc::UnboundedSender<ServerFrame>,
     pub ack_mode: String,
     pub version: StompVersion,
 }
@@ -75,7 +81,7 @@ struct PendingAckInfo {
     conn_id: Uuid,
     sub_id: String,
     destination: String,
-    frame: StompFrame<'static>,
+    frame: Arc<StompFrame<'static>>,
     ack_mode: String,
     time_sent: std::time::Instant,
     message_id: String,
@@ -145,7 +151,7 @@ impl PubSubRouter {
         destination: String,
         ack_mode: String,
         version: StompVersion,
-        sender: mpsc::UnboundedSender<StompFrame<'static>>,
+        sender: mpsc::UnboundedSender<ServerFrame>,
     ) -> Result<(), &'static str> {
         let kind = classify_destination(&destination).ok_or("Unknown destination")?;
         if kind == DestinationKind::Queue && contains_wildcard(&destination) {
@@ -225,7 +231,7 @@ impl PubSubRouter {
         }
 
         for (destination, frame) in to_republish {
-            let _ = self.publish(&destination, frame).await;
+            let _ = self.publish_shared(&destination, frame).await;
         }
     }
 
@@ -276,7 +282,7 @@ impl PubSubRouter {
             }
         }
         for (destination, frame) in to_republish {
-            let _ = self.publish(&destination, frame).await;
+            let _ = self.publish_shared(&destination, frame).await;
         }
     }
 
@@ -284,6 +290,14 @@ impl PubSubRouter {
         &self,
         destination: &str,
         frame: StompFrame<'static>,
+    ) -> Result<(), &'static str> {
+        self.publish_shared(destination, Arc::new(frame)).await
+    }
+
+    pub async fn publish_shared(
+        &self,
+        destination: &str,
+        frame: Arc<StompFrame<'static>>,
     ) -> Result<(), &'static str> {
         let kind = classify_destination(destination).ok_or("Unknown destination")?;
         let mut state = self.state.write().await;
@@ -309,16 +323,13 @@ impl PubSubRouter {
                     }
                 }
                 for (conn_id, sub_id, ack_mode, version, sender) in target_subs {
-                    let mut f = frame.clone();
-                    f.headers.retain(|(k, _)| k != "subscription");
-                    f.headers.push(("subscription".to_string(), sub_id.clone()));
+                    let mut ack_id = None;
                     if ack_mode == "client" || ack_mode == "client-individual" {
                         let delivery_id = Uuid::new_v4().to_string();
                         if version == StompVersion::V1_2 {
-                            f.headers.retain(|(k, _)| k != "ack");
-                            f.headers.push(("ack".to_string(), delivery_id.clone()));
+                            ack_id = Some(delivery_id.clone());
                         }
-                        let message_id = f
+                        let message_id = frame
                             .get_header("message-id")
                             .map(|s| s.to_string())
                             .unwrap_or_default();
@@ -327,7 +338,7 @@ impl PubSubRouter {
                             delivery_id,
                             PendingAckInfo {
                                 conn_id,
-                                sub_id,
+                                sub_id: sub_id.clone(),
                                 destination: destination.to_string(),
                                 frame: frame.clone(),
                                 ack_mode,
@@ -336,7 +347,7 @@ impl PubSubRouter {
                             },
                         );
                     }
-                    let _ = sender.send(f);
+                    let _ = sender.send(ServerFrame::Borrowed(frame.clone(), Some(sub_id), ack_id));
                 }
             }
             DestinationKind::Queue => {
@@ -347,17 +358,13 @@ impl PubSubRouter {
                     let index = queue.next_index % queue.subscriptions.len();
                     queue.next_index = (index + 1) % queue.subscriptions.len();
                     let sub = &queue.subscriptions[index];
-                    let mut f = frame.clone();
-                    f.headers.retain(|(k, _)| k != "subscription");
-                    f.headers
-                        .push(("subscription".to_string(), sub.sub_id.clone()));
+                    let mut ack_id = None;
                     if sub.ack_mode == "client" || sub.ack_mode == "client-individual" {
                         let delivery_id = Uuid::new_v4().to_string();
                         if sub.version == StompVersion::V1_2 {
-                            f.headers.retain(|(k, _)| k != "ack");
-                            f.headers.push(("ack".to_string(), delivery_id.clone()));
+                            ack_id = Some(delivery_id.clone());
                         }
-                        let message_id = f
+                        let message_id = frame
                             .get_header("message-id")
                             .map(|s| s.to_string())
                             .unwrap_or_default();
@@ -368,14 +375,18 @@ impl PubSubRouter {
                                 conn_id: sub.conn_id,
                                 sub_id: sub.sub_id.clone(),
                                 destination: destination.to_string(),
-                                frame,
+                                frame: frame.clone(),
                                 ack_mode: sub.ack_mode.clone(),
                                 time_sent: std::time::Instant::now(),
                                 message_id,
                             },
                         );
                     }
-                    let _ = sub.sender.send(f);
+                    let _ = sub.sender.send(ServerFrame::Borrowed(
+                        frame,
+                        Some(sub.sub_id.clone()),
+                        ack_id,
+                    ));
                 }
             }
         }
@@ -489,6 +500,15 @@ impl ServerConfig {
     }
 }
 
+/// The main STOMP server instance.
+///
+/// # Examples
+/// ```
+/// use stompoxide_server::StompServer;
+///
+/// let server = StompServer::new();
+/// let router = server.router();
+/// ```
 #[derive(Clone, Default)]
 pub struct StompServer {
     router: PubSubRouter,
@@ -731,17 +751,24 @@ impl StompServer {
         }
 
         // Channels for outgoing frames
-        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<StompFrame<'static>>();
+        let (out_tx, mut out_rx) = mpsc::unbounded_channel::<ServerFrame>();
         let (write_cmd_tx, mut write_cmd_rx) = mpsc::channel::<WriteCommand>(100);
 
         // Spawn a background write worker to serialize frames to the socket
         let write_worker = tokio::spawn(async move {
+            let mut write_buf = bytes::BytesMut::new();
             loop {
                 tokio::select! {
                     Some(frame) = out_rx.recv() => {
-                        log::info!("Connection {}: Sending frame: {:?}", conn_id, frame.command);
-                        if let Err(e) = framed_write.send(frame).await {
+                        log::info!("Connection {}: Sending frame: {:?}", conn_id, frame);
+                        write_buf.clear();
+                        serialize_server_frame(&frame, negotiated_version, &mut write_buf);
+                        if let Err(e) = framed_write.get_mut().write_all(&write_buf).await {
                             log::error!("Connection {}: Writer worker error: {:?}", conn_id, e);
+                            break;
+                        }
+                        if let Err(e) = framed_write.get_mut().flush().await {
+                            log::error!("Connection {}: Writer worker flush error: {:?}", conn_id, e);
                             break;
                         }
                     }
@@ -869,302 +896,42 @@ impl StompServer {
                     }
 
                     if should_process_normally {
-                        match frame.command.as_ref() {
+                        let process_result = match frame.command.as_ref() {
                             "BEGIN" => {
-                                let t_id = match frame.get_header("transaction") {
-                                    Some(id) => id.to_string(),
-                                    None => {
-                                        let _ = send_command_frame(
-                                            &write_cmd_tx,
-                                            create_error_frame("Missing transaction header"),
-                                            true,
-                                        )
-                                        .await;
-                                        break;
-                                    }
-                                };
-                                if transactions.contains_key(&t_id) {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame(&format!(
-                                            "Transaction '{}' already active",
-                                            t_id
-                                        )),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
-                                transactions.insert(t_id, Vec::new());
+                                self.handle_begin_cmd(&frame, &write_cmd_tx, &mut transactions)
+                                    .await
                             }
                             "COMMIT" => {
-                                let t_id = match frame.get_header("transaction") {
-                                    Some(id) => id.to_string(),
-                                    None => {
-                                        let _ = send_command_frame(
-                                            &write_cmd_tx,
-                                            create_error_frame("Missing transaction header"),
-                                            true,
-                                        )
-                                        .await;
-                                        break;
-                                    }
-                                };
-                                if let Some(buffered_frames) = transactions.remove(&t_id) {
-                                    let mut commit_failed = false;
-                                    for f in buffered_frames {
-                                        let sub_receipt =
-                                            f.get_header("receipt").map(|s| s.to_string());
-                                        match f.command.as_ref() {
-                                            "SEND" => {
-                                                let destination = f
-                                                    .get_header("destination")
-                                                    .map(|s| s.to_string());
-                                                if let Some(dest) = destination {
-                                                    let mut message_frame = StompFrame {
-                                                        command: Cow::Borrowed("MESSAGE"),
-                                                        headers: f
-                                                            .headers
-                                                            .iter()
-                                                            .filter(|(k, _)| {
-                                                                k != "receipt"
-                                                                    && k != "ack"
-                                                                    && k != "transaction"
-                                                            })
-                                                            .cloned()
-                                                            .collect(),
-                                                        body: f
-                                                            .body
-                                                            .map(|b| Cow::Owned(b.into_owned())),
-                                                    };
-                                                    let message_id = Uuid::new_v4().to_string();
-                                                    message_frame.headers.push((
-                                                        "message-id".to_string(),
-                                                        message_id,
-                                                    ));
-                                                    if let Err(message) =
-                                                        router.publish(&dest, message_frame).await
-                                                    {
-                                                        let _ = send_command_frame(
-                                                            &write_cmd_tx,
-                                                            create_error_frame(message),
-                                                            true,
-                                                        )
-                                                        .await;
-                                                        commit_failed = true;
-                                                        break;
-                                                    }
-                                                } else {
-                                                    let _ = send_command_frame(
-                                                        &write_cmd_tx,
-                                                        create_error_frame(
-                                                            "Missing destination header",
-                                                        ),
-                                                        true,
-                                                    )
-                                                    .await;
-                                                    commit_failed = true;
-                                                    break;
-                                                }
-                                            }
-                                            "ACK" => {
-                                                match ack_id_and_subscription(
-                                                    &f,
-                                                    negotiated_version,
-                                                ) {
-                                                    Ok(target) => {
-                                                        router.handle_ack(conn_id, target).await;
-                                                    }
-                                                    Err(message) => {
-                                                        let _ = send_command_frame(
-                                                            &write_cmd_tx,
-                                                            create_error_frame(&message),
-                                                            true,
-                                                        )
-                                                        .await;
-                                                        commit_failed = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            "NACK" => {
-                                                match ack_id_and_subscription(
-                                                    &f,
-                                                    negotiated_version,
-                                                ) {
-                                                    Ok(target) => {
-                                                        router.handle_nack(conn_id, target).await;
-                                                    }
-                                                    Err(message) => {
-                                                        let _ = send_command_frame(
-                                                            &write_cmd_tx,
-                                                            create_error_frame(&message),
-                                                            true,
-                                                        )
-                                                        .await;
-                                                        commit_failed = true;
-                                                        break;
-                                                    }
-                                                }
-                                            }
-                                            _ => {}
-                                        }
-                                        if let Some(r_id) = sub_receipt {
-                                            let _ = send_command_frame(
-                                                &write_cmd_tx,
-                                                create_receipt_frame(r_id),
-                                                false,
-                                            )
-                                            .await;
-                                        }
-                                    }
-                                    if commit_failed {
-                                        break;
-                                    }
-                                } else {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame(&format!(
-                                            "Transaction '{}' not active",
-                                            t_id
-                                        )),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
+                                self.handle_commit_cmd(
+                                    &frame,
+                                    &write_cmd_tx,
+                                    &mut transactions,
+                                    conn_id,
+                                    negotiated_version,
+                                )
+                                .await
                             }
                             "ABORT" => {
-                                let t_id = match frame.get_header("transaction") {
-                                    Some(id) => id.to_string(),
-                                    None => {
-                                        let _ = send_command_frame(
-                                            &write_cmd_tx,
-                                            create_error_frame("Missing transaction header"),
-                                            true,
-                                        )
-                                        .await;
-                                        break;
-                                    }
-                                };
-                                if transactions.remove(&t_id).is_none() {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame(&format!(
-                                            "Transaction '{}' not active",
-                                            t_id
-                                        )),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
+                                self.handle_abort_cmd(&frame, &write_cmd_tx, &mut transactions)
+                                    .await
                             }
                             "SUBSCRIBE" => {
-                                let id = frame.get_header("id").map(|s| s.to_string());
-                                let destination =
-                                    frame.get_header("destination").map(|s| s.to_string());
-
-                                let ack_mode =
-                                    frame.get_header("ack").unwrap_or("auto").to_string();
-                                if negotiated_version == StompVersion::V1_0
-                                    && ack_mode == "client-individual"
-                                {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame(
-                                            "STOMP 1.0 does not support client-individual ack mode",
-                                        ),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
-                                if let (Some(sub_id), Some(dest)) = (id, destination) {
-                                    if let Err(message) = router
-                                        .subscribe(
-                                            conn_id,
-                                            sub_id,
-                                            dest,
-                                            ack_mode,
-                                            negotiated_version,
-                                            out_tx.clone(),
-                                        )
-                                        .await
-                                    {
-                                        let _ = send_command_frame(
-                                            &write_cmd_tx,
-                                            create_error_frame(message),
-                                            true,
-                                        )
-                                        .await;
-                                        break;
-                                    }
-                                } else {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame("Missing SUBSCRIBE headers"),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
+                                self.handle_subscribe_cmd(
+                                    &frame,
+                                    &write_cmd_tx,
+                                    conn_id,
+                                    negotiated_version,
+                                    &out_tx,
+                                )
+                                .await
                             }
                             "UNSUBSCRIBE" => {
-                                let id = frame.get_header("id").map(|s| s.to_string());
-                                if let Some(sub_id) = id {
-                                    router.unsubscribe(conn_id, &sub_id).await;
-                                } else {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame("Missing UNSUBSCRIBE id"),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
+                                self.handle_unsubscribe_cmd(&frame, &write_cmd_tx, conn_id)
+                                    .await
                             }
-                            "SEND" => {
-                                let destination =
-                                    frame.get_header("destination").map(|s| s.to_string());
-                                if let Some(dest) = destination {
-                                    // Create MESSAGE frame from SEND
-                                    let mut message_frame = StompFrame {
-                                        command: Cow::Borrowed("MESSAGE"),
-                                        headers: frame
-                                            .headers
-                                            .iter()
-                                            .filter(|(k, _)| k != "receipt" && k != "ack")
-                                            .cloned()
-                                            .collect(),
-                                        body: frame.body.map(|b| Cow::Owned(b.into_owned())),
-                                    };
-                                    let message_id = Uuid::new_v4().to_string();
-                                    message_frame
-                                        .headers
-                                        .push(("message-id".to_string(), message_id));
-                                    if let Err(message) = router.publish(&dest, message_frame).await
-                                    {
-                                        let _ = send_command_frame(
-                                            &write_cmd_tx,
-                                            create_error_frame(message),
-                                            true,
-                                        )
-                                        .await;
-                                        break;
-                                    }
-                                } else {
-                                    let _ = send_command_frame(
-                                        &write_cmd_tx,
-                                        create_error_frame("Missing destination header"),
-                                        true,
-                                    )
-                                    .await;
-                                    break;
-                                }
-                            }
+                            "SEND" => self.handle_send_cmd(&frame, &write_cmd_tx).await,
                             "DISCONNECT" => {
-                                if let Some(r_id) = receipt_id {
+                                if let Some(r_id) = receipt_id.clone() {
                                     let _ = send_command_frame(
                                         &write_cmd_tx,
                                         create_receipt_frame(r_id),
@@ -1172,21 +939,21 @@ impl StompServer {
                                     )
                                     .await;
                                 }
-                                break;
+                                Err(())
                             }
                             "ACK" => {
                                 let target = ack_id_and_subscription(&frame, negotiated_version)
                                     .expect("ACK was validated before handling");
                                 router.handle_ack(conn_id, target).await;
+                                Ok(())
                             }
                             "NACK" => {
                                 let target = ack_id_and_subscription(&frame, negotiated_version)
                                     .expect("NACK was validated before handling");
                                 router.handle_nack(conn_id, target).await;
+                                Ok(())
                             }
-                            "HEARTBEAT" => {
-                                // Heartbeat, do nothing
-                            }
+                            "HEARTBEAT" => Ok(()),
                             command => {
                                 let _ = send_command_frame(
                                     &write_cmd_tx,
@@ -1197,8 +964,11 @@ impl StompServer {
                                     true,
                                 )
                                 .await;
-                                break;
+                                Err(())
                             }
+                        };
+                        if process_result.is_err() {
+                            break;
                         }
                     }
 
@@ -1229,6 +999,292 @@ impl StompServer {
         // Clean up connection
         router.clean_connection(conn_id).await;
         write_worker.abort();
+    }
+
+    async fn handle_begin_cmd(
+        &self,
+        frame: &StompFrame<'_>,
+        write_cmd_tx: &mpsc::Sender<WriteCommand>,
+        transactions: &mut HashMap<String, Vec<StompFrame<'static>>>,
+    ) -> Result<(), ()> {
+        let t_id = match frame.get_header("transaction") {
+            Some(id) => id.to_string(),
+            None => {
+                let _ = send_command_frame(
+                    write_cmd_tx,
+                    create_error_frame("Missing transaction header"),
+                    true,
+                )
+                .await;
+                return Err(());
+            }
+        };
+        if transactions.contains_key(&t_id) {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame(&format!("Transaction '{}' already active", t_id)),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+        transactions.insert(t_id, Vec::new());
+        Ok(())
+    }
+
+    async fn handle_commit_cmd(
+        &self,
+        frame: &StompFrame<'_>,
+        write_cmd_tx: &mpsc::Sender<WriteCommand>,
+        transactions: &mut HashMap<String, Vec<StompFrame<'static>>>,
+        conn_id: Uuid,
+        negotiated_version: StompVersion,
+    ) -> Result<(), ()> {
+        let t_id = match frame.get_header("transaction") {
+            Some(id) => id.to_string(),
+            None => {
+                let _ = send_command_frame(
+                    write_cmd_tx,
+                    create_error_frame("Missing transaction header"),
+                    true,
+                )
+                .await;
+                return Err(());
+            }
+        };
+        if let Some(buffered_frames) = transactions.remove(&t_id) {
+            let mut commit_failed = false;
+            for f in buffered_frames {
+                let sub_receipt = f.get_header("receipt").map(|s| s.to_string());
+                match f.command.as_ref() {
+                    "SEND" => {
+                        let destination = f.get_header("destination").map(|s| s.to_string());
+                        if let Some(dest) = destination {
+                            let mut message_frame = StompFrame {
+                                command: Cow::Borrowed("MESSAGE"),
+                                headers: f
+                                    .headers
+                                    .iter()
+                                    .filter(|(k, _)| {
+                                        k != "receipt" && k != "ack" && k != "transaction"
+                                    })
+                                    .cloned()
+                                    .collect(),
+                                body: f.body.map(|b| Cow::Owned(b.into_owned())),
+                            };
+                            let message_id = Uuid::new_v4().to_string();
+                            message_frame
+                                .headers
+                                .push(("message-id".to_string(), message_id));
+                            if let Err(message) = self.router.publish(&dest, message_frame).await {
+                                let _ = send_command_frame(
+                                    write_cmd_tx,
+                                    create_error_frame(message),
+                                    true,
+                                )
+                                .await;
+                                commit_failed = true;
+                                break;
+                            }
+                        } else {
+                            let _ = send_command_frame(
+                                write_cmd_tx,
+                                create_error_frame("Missing destination header"),
+                                true,
+                            )
+                            .await;
+                            commit_failed = true;
+                            break;
+                        }
+                    }
+                    "ACK" => match ack_id_and_subscription(&f, negotiated_version) {
+                        Ok(target) => {
+                            self.router.handle_ack(conn_id, target).await;
+                        }
+                        Err(message) => {
+                            let _ = send_command_frame(
+                                write_cmd_tx,
+                                create_error_frame(&message),
+                                true,
+                            )
+                            .await;
+                            commit_failed = true;
+                            break;
+                        }
+                    },
+                    "NACK" => match ack_id_and_subscription(&f, negotiated_version) {
+                        Ok(target) => {
+                            self.router.handle_nack(conn_id, target).await;
+                        }
+                        Err(message) => {
+                            let _ = send_command_frame(
+                                write_cmd_tx,
+                                create_error_frame(&message),
+                                true,
+                            )
+                            .await;
+                            commit_failed = true;
+                            break;
+                        }
+                    },
+                    _ => {}
+                }
+                if let Some(r_id) = sub_receipt {
+                    let _ =
+                        send_command_frame(write_cmd_tx, create_receipt_frame(r_id), false).await;
+                }
+            }
+            if commit_failed {
+                return Err(());
+            }
+        } else {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame(&format!("Transaction '{}' not active", t_id)),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+        Ok(())
+    }
+
+    async fn handle_abort_cmd(
+        &self,
+        frame: &StompFrame<'_>,
+        write_cmd_tx: &mpsc::Sender<WriteCommand>,
+        transactions: &mut HashMap<String, Vec<StompFrame<'static>>>,
+    ) -> Result<(), ()> {
+        let t_id = match frame.get_header("transaction") {
+            Some(id) => id.to_string(),
+            None => {
+                let _ = send_command_frame(
+                    write_cmd_tx,
+                    create_error_frame("Missing transaction header"),
+                    true,
+                )
+                .await;
+                return Err(());
+            }
+        };
+        if transactions.remove(&t_id).is_none() {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame(&format!("Transaction '{}' not active", t_id)),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+        Ok(())
+    }
+
+    async fn handle_subscribe_cmd(
+        &self,
+        frame: &StompFrame<'_>,
+        write_cmd_tx: &mpsc::Sender<WriteCommand>,
+        conn_id: Uuid,
+        negotiated_version: StompVersion,
+        out_tx: &mpsc::UnboundedSender<ServerFrame>,
+    ) -> Result<(), ()> {
+        let id = frame.get_header("id").map(|s| s.to_string());
+        let destination = frame.get_header("destination").map(|s| s.to_string());
+        let ack_mode = frame.get_header("ack").unwrap_or("auto").to_string();
+
+        if negotiated_version == StompVersion::V1_0 && ack_mode == "client-individual" {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame("STOMP 1.0 does not support client-individual ack mode"),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+
+        if let (Some(sub_id), Some(dest)) = (id, destination) {
+            if let Err(message) = self
+                .router
+                .subscribe(
+                    conn_id,
+                    sub_id,
+                    dest,
+                    ack_mode,
+                    negotiated_version,
+                    out_tx.clone(),
+                )
+                .await
+            {
+                let _ = send_command_frame(write_cmd_tx, create_error_frame(message), true).await;
+                return Err(());
+            }
+        } else {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame("Missing SUBSCRIBE headers"),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+        Ok(())
+    }
+
+    async fn handle_unsubscribe_cmd(
+        &self,
+        frame: &StompFrame<'_>,
+        write_cmd_tx: &mpsc::Sender<WriteCommand>,
+        conn_id: Uuid,
+    ) -> Result<(), ()> {
+        let id = frame.get_header("id").map(|s| s.to_string());
+        if let Some(sub_id) = id {
+            self.router.unsubscribe(conn_id, &sub_id).await;
+        } else {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame("Missing UNSUBSCRIBE id"),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+        Ok(())
+    }
+
+    async fn handle_send_cmd(
+        &self,
+        frame: &StompFrame<'_>,
+        write_cmd_tx: &mpsc::Sender<WriteCommand>,
+    ) -> Result<(), ()> {
+        let destination = frame.get_header("destination").map(|s| s.to_string());
+        if let Some(dest) = destination {
+            let mut message_frame = StompFrame {
+                command: Cow::Borrowed("MESSAGE"),
+                headers: frame
+                    .headers
+                    .iter()
+                    .filter(|(k, _)| k != "receipt" && k != "ack")
+                    .cloned()
+                    .collect(),
+                body: frame.body.as_ref().map(|b| Cow::Owned(b.as_ref().to_vec())),
+            };
+            let message_id = Uuid::new_v4().to_string();
+            message_frame
+                .headers
+                .push(("message-id".to_string(), message_id));
+            if let Err(message) = self.router.publish(&dest, message_frame).await {
+                let _ = send_command_frame(write_cmd_tx, create_error_frame(message), true).await;
+                return Err(());
+            }
+        } else {
+            let _ = send_command_frame(
+                write_cmd_tx,
+                create_error_frame("Missing destination header"),
+                true,
+            )
+            .await;
+            return Err(());
+        }
+        Ok(())
     }
 }
 
@@ -1312,6 +1368,55 @@ fn create_receipt_frame(receipt_id: String) -> StompFrame<'static> {
         headers: vec![("receipt-id".to_string(), receipt_id)],
         body: None,
     }
+}
+
+fn serialize_server_frame(item: &ServerFrame, version: StompVersion, dst: &mut bytes::BytesMut) {
+    match item {
+        ServerFrame::Owned(frame) => {
+            frame.serialize_to_buf(version, dst);
+        }
+        ServerFrame::Borrowed(frame, subscription, ack) => {
+            serialize_shared_frame(frame, subscription.as_deref(), ack.as_deref(), version, dst);
+        }
+    }
+}
+
+fn serialize_shared_frame<B: bytes::BufMut>(
+    frame: &StompFrame<'static>,
+    subscription: Option<&str>,
+    ack: Option<&str>,
+    version: StompVersion,
+    buf: &mut B,
+) {
+    let escape = !stompoxide_codec::is_control_frame(&frame.command);
+
+    buf.put_slice(frame.command.as_bytes());
+    buf.put_u8(b'\n');
+
+    frame
+        .headers
+        .iter()
+        .filter(|(key, _)| key != "content-length" && key != "subscription" && key != "ack")
+        .for_each(|(key, val)| {
+            stompoxide_codec::write_escaped_header(buf, key, val, escape, version);
+        });
+
+    if let Some(sub_id) = subscription {
+        stompoxide_codec::write_escaped_header(buf, "subscription", sub_id, escape, version);
+    }
+
+    if let Some(ack_id) = ack {
+        stompoxide_codec::write_escaped_header(buf, "ack", ack_id, escape, version);
+    }
+
+    if let Some(body) = &frame.body {
+        buf.put_slice(&stompoxide_codec::get_content_length_header(body));
+        buf.put_u8(b'\n');
+        buf.put_slice(body);
+    } else {
+        buf.put_u8(b'\n');
+    }
+    buf.put_u8(b'\x00');
 }
 
 #[cfg(test)]

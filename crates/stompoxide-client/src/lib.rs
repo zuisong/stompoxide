@@ -42,7 +42,16 @@ impl fmt::Display for StompError {
     }
 }
 
-impl std::error::Error for StompError {}
+impl std::error::Error for StompError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(e) => Some(e),
+            Self::Protocol(_) => None,
+            Self::Disconnected => None,
+            Self::ReceiptTimeout => None,
+        }
+    }
+}
 
 impl From<std::io::Error> for StompError {
     fn from(err: std::io::Error) -> Self {
@@ -50,6 +59,22 @@ impl From<std::io::Error> for StompError {
     }
 }
 
+/// Configuration for the STOMP Client.
+///
+/// # Examples
+/// ```
+/// use stompoxide_client::ClientConfig;
+///
+/// let config = ClientConfig {
+///     host: "localhost".to_string(),
+///     login: None,
+///     passcode: None,
+///     heartbeat_cx: 0,
+///     heartbeat_cy: 0,
+///     accept_versions: vec!["1.2".to_string()],
+/// };
+/// assert_eq!(config.host, "localhost");
+/// ```
 #[derive(Clone, Debug)]
 pub struct ClientConfig {
     pub host: String,
@@ -656,14 +681,19 @@ impl Drop for Subscription {
         if !self.auto_unsubscribe {
             return;
         }
-        let cmd_tx = self.cmd_tx.clone();
         let id = self.id.clone();
-        tokio::spawn(async move {
-            let (resp_tx, _resp_rx) = oneshot::channel();
-            let _ = cmd_tx
-                .send(ClientCmd::Unsubscribe { id, resp: resp_tx })
-                .await;
-        });
+        let (resp_tx, _resp_rx) = oneshot::channel();
+        let cmd = ClientCmd::Unsubscribe { id, resp: resp_tx };
+        match self.cmd_tx.try_send(cmd) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(cmd)) => {
+                let cmd_tx = self.cmd_tx.clone();
+                tokio::spawn(async move {
+                    let _ = cmd_tx.send(cmd).await;
+                });
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
     }
 }
 

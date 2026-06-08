@@ -26,7 +26,12 @@ async fn main() {
 
                 let selected_protocol = select_stomp_subprotocol(protocol.as_deref());
 
-                warp::reply::with_header(reply, "sec-websocket-protocol", selected_protocol)
+                use warp::Reply;
+                if let Some(proto) = selected_protocol {
+                    warp::reply::with_header(reply, "sec-websocket-protocol", proto).into_response()
+                } else {
+                    reply.into_response()
+                }
             },
         );
 

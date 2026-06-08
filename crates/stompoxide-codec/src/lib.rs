@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use tokio_util::codec::{Decoder, Encoder};
 use winnow::{
     ModalResult as PResult, ModalResult, Parser, Partial,
@@ -14,6 +14,20 @@ mod tests;
 
 pub const DEFAULT_MAX_BODY_SIZE: usize = 64 * 1024 * 1024;
 
+/// Represents a parsed STOMP frame.
+///
+/// # Examples
+/// ```
+/// use stompoxide_codec::StompFrame;
+/// use std::borrow::Cow;
+///
+/// let frame = StompFrame {
+///     command: Cow::Borrowed("CONNECT"),
+///     headers: vec![("accept-version".to_string(), "1.2".to_string())],
+///     body: None,
+/// };
+/// assert_eq!(frame.command, "CONNECT");
+/// ```
 #[derive(Debug, Clone)]
 pub struct StompFrame<'a> {
     pub command: Cow<'a, str>,
@@ -53,56 +67,29 @@ impl StompFrame<'_> {
 
     pub fn serialize_with_version(&'_ self, version: StompVersion) -> Cow<'_, [u8]> {
         let mut buf = Vec::new();
-        let escape =
-            !(self.command == "CONNECT" || self.command == "CONNECTED" || self.command == "STOMP");
+        self.serialize_to_buf(version, &mut buf);
+        Cow::Owned(buf)
+    }
 
-        fn escaped(b: &u8, escape: bool, version: StompVersion) -> &[u8] {
-            if escape {
-                match version {
-                    StompVersion::V1_0 => std::slice::from_ref(b),
-                    StompVersion::V1_1 => match b {
-                        b'\n' => b"\\n",
-                        b':' => b"\\c",
-                        b'\\' => b"\\\\",
-                        bytes => std::slice::from_ref(bytes),
-                    },
-                    StompVersion::V1_2 => match b {
-                        b'\r' => b"\\r",
-                        b'\n' => b"\\n",
-                        b':' => b"\\c",
-                        b'\\' => b"\\\\",
-                        bytes => std::slice::from_ref(bytes),
-                    },
-                }
-            } else {
-                std::slice::from_ref(b)
-            }
-        }
+    pub fn serialize_to_buf<B: BufMut>(&self, version: StompVersion, buf: &mut B) {
+        let escape = !is_control_frame(&self.command);
 
-        buf.extend_from_slice(self.command.as_bytes());
-        buf.push(b'\n');
+        buf.put_slice(self.command.as_bytes());
+        buf.put_u8(b'\n');
         self.headers
             .iter()
             .filter(|(key, _)| key != "content-length")
             .for_each(|(key, val)| {
-                for byte in key.as_bytes() {
-                    buf.extend_from_slice(escaped(byte, escape, version));
-                }
-                buf.push(b':');
-                for byte in val.as_bytes() {
-                    buf.extend_from_slice(escaped(byte, escape, version));
-                }
-                buf.push(b'\n');
+                write_escaped_header(buf, key, val, escape, version);
             });
         if let Some(body) = &self.body {
-            buf.extend_from_slice(&get_content_length_header(body));
-            buf.push(b'\n');
-            buf.extend_from_slice(body);
+            buf.put_slice(&get_content_length_header(body));
+            buf.put_u8(b'\n');
+            buf.put_slice(body);
         } else {
-            buf.push(b'\n');
+            buf.put_u8(b'\n');
         }
-        buf.push(b'\x00');
-        Cow::Owned(buf)
+        buf.put_u8(b'\x00');
     }
 }
 
@@ -241,8 +228,55 @@ fn unescape(input: &[u8], version: StompVersion) -> PResult<String> {
     Ok(s)
 }
 
-fn get_content_length_header(body: &[u8]) -> Vec<u8> {
+#[doc(hidden)]
+pub fn get_content_length_header(body: &[u8]) -> Vec<u8> {
     format!("content-length:{}\n", body.len()).into_bytes()
+}
+
+#[doc(hidden)]
+pub fn is_control_frame(command: &str) -> bool {
+    command == "CONNECT" || command == "CONNECTED" || command == "STOMP"
+}
+
+fn escaped(b: &u8, escape: bool, version: StompVersion) -> &[u8] {
+    if escape {
+        match version {
+            StompVersion::V1_0 => std::slice::from_ref(b),
+            StompVersion::V1_1 => match b {
+                b'\n' => b"\\n",
+                b':' => b"\\c",
+                b'\\' => b"\\\\",
+                bytes => std::slice::from_ref(bytes),
+            },
+            StompVersion::V1_2 => match b {
+                b'\r' => b"\\r",
+                b'\n' => b"\\n",
+                b':' => b"\\c",
+                b'\\' => b"\\\\",
+                bytes => std::slice::from_ref(bytes),
+            },
+        }
+    } else {
+        std::slice::from_ref(b)
+    }
+}
+
+#[doc(hidden)]
+pub fn write_escaped_header<B: BufMut>(
+    buf: &mut B,
+    name: &str,
+    value: &str,
+    escape: bool,
+    version: StompVersion,
+) {
+    for byte in name.as_bytes() {
+        buf.put_slice(escaped(byte, escape, version));
+    }
+    buf.put_u8(b':');
+    for byte in value.as_bytes() {
+        buf.put_slice(escaped(byte, escape, version));
+    }
+    buf.put_u8(b'\n');
 }
 
 pub struct StompCodec {
@@ -320,8 +354,7 @@ impl Encoder<StompFrame<'_>> for StompCodec {
     type Error = std::io::Error;
 
     fn encode(&mut self, item: StompFrame<'_>, dst: &mut BytesMut) -> Result<(), Self::Error> {
-        let serialized = item.serialize_with_version(self.version);
-        dst.extend_from_slice(serialized.as_ref());
+        item.serialize_to_buf(self.version, dst);
         Ok(())
     }
 }
